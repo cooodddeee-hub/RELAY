@@ -1,0 +1,21 @@
+﻿PROJECT: Campus Connect
+DATE: 10 November 2026
+
+DECISION:
+The team selected React for the frontend and Node.js with Express for the backend.
+
+COMPLETED WORK:
+The login page and project dashboard have been implemented.
+
+PENDING TASKS:
+The team still needs to implement email verification and finish mobile responsiveness.
+
+BLOCKER:
+Email verification is blocked because the SMTP credentials have not been configured.
+
+RESPONSIBILITIES:
+Aarav is responsible for backend APIs.
+Meera is responsible for frontend development.
+
+NEXT ACTION:
+Configure SMTP credentials and test the email verification workflow.
