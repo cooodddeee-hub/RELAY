@@ -1,5 +1,10 @@
 import mongoose from 'mongoose';
 
+const providerAttemptSchema = new mongoose.Schema({
+  provider: { type: String, enum: ['gemini', 'cloudflare'], required: true },
+  outcome: { type: String, enum: ['temporary_failure', 'permanent_failure', 'invalid_output', 'configuration_failure'], required: true },
+}, { _id: false });
+
 const schema = new mongoose.Schema({
   project: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -14,6 +19,7 @@ const schema = new mongoose.Schema({
   retryable: { type: Boolean, default: false },
   lastErrorKind: String,
   lastErrorStatus: Number,
+  lastProviderAttempts: { type: [providerAttemptSchema], default: undefined },
   leaseToken: { type: String, select: false },
   leaseExpiresAt: { type: Date, select: false },
   startedAt: Date,

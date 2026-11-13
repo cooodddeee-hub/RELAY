@@ -16,6 +16,7 @@ export class GeminiAnalysisError extends Error {
     this.provider = options.provider || 'gemini';
     this.providerStatus = options.providerStatus;
     this.retryable = options.retryable || false;
+    this.providerAttempts = options.providerAttempts;
   }
 }
 
@@ -128,6 +129,12 @@ function isTemporaryProviderFailure(error) {
   if (status === 401 || status === 403) return false;
   if (status !== undefined) return isTemporaryHttpStatus(status);
   return error.retryable === true;
+}
+
+function providerFailureOutcome(error) {
+  if (error?.kind === 'configuration') return 'configuration_failure';
+  if (error?.kind === 'invalid_response') return 'invalid_output';
+  return isTemporaryProviderFailure(error) ? 'temporary_failure' : 'permanent_failure';
 }
 
 function getGeminiClient(options, apiKey, timeoutMs) {
@@ -274,13 +281,21 @@ export async function extractFindings(source, options = {}) {
         ? await requestCloudflare(source, prompt, options, true)
         : await requestGemini(source, prompt, options, true);
     } catch (fallbackError) {
-      if (fallbackError instanceof GeminiAnalysisError && fallbackError.kind === 'invalid_response') throw fallbackError;
+      const attempts = [
+        { provider: providers[0], outcome: providerFailureOutcome(primaryError) },
+        { provider: providers[1], outcome: providerFailureOutcome(fallbackError) },
+      ];
+      if (fallbackError instanceof GeminiAnalysisError && fallbackError.kind === 'invalid_response') {
+        fallbackError.providerAttempts = attempts;
+        throw fallbackError;
+      }
       throw new GeminiAnalysisError('Neither AI provider could complete the analysis.', {
         status: fallbackError.status || 503,
         kind: fallbackError.kind || 'fallback_provider',
         provider: fallbackError.provider || providers[1],
         providerStatus: fallbackError.providerStatus,
         retryable: fallbackError.retryable,
+        providerAttempts: attempts,
       });
     }
   }

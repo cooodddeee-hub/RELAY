@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { DEMO_ANALYSIS_FALLBACK } from './data/demoAnalysisFallback.js';
 
 const API_URL = (import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || window.RELAY_API_URL || '/api')).replace(/\/$/, '');
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || '').trim();
@@ -943,6 +944,37 @@ function renderAnalysisJob() {
       : 'The current source was not committed. Check the provider or source, then retry when ready.');
     panel.append(node('p', reason, 'mt-3 text-sm leading-5 text-rose-200'));
     if (Number.isInteger(active.lastErrorStatus)) panel.append(node('p', `Sanitized failure status: ${active.lastErrorStatus}`, 'mt-2 text-xs text-rose-100/55'));
+    if (active.demoFallbackAvailable && !state.analysisStarting && !state.analysisAdvancing) {
+      const demo = node('section', undefined, 'mt-5 rounded-2xl border border-amber-300/25 bg-amber-400/[0.06] p-4 sm:p-5');
+      demo.append(node('p', DEMO_ANALYSIS_FALLBACK.label, 'inline-flex rounded-full border border-amber-200/30 bg-amber-300/10 px-3 py-1 text-[11px] font-bold tracking-wide text-amber-100'));
+      demo.append(node('h3', 'Live analysis failed · sample demonstration opened', 'mt-3 text-base font-semibold text-white'));
+      demo.append(node('p', 'Gemini and its eligible Cloudflare fallback both failed. Your real project, sources, findings, and retry remain unchanged. The sample below is separate and is not part of this project.', 'mt-1 text-sm leading-6 text-white/65'));
+
+      const report = node('div', undefined, 'mt-4 rounded-xl border border-white/10 bg-black/15 p-4');
+      report.append(node('p', DEMO_ANALYSIS_FALLBACK.label, 'text-[10px] font-bold tracking-widest text-amber-100/80'));
+      report.append(node('h4', 'Sample handover preview · Campus Connect', 'mt-2 text-sm font-semibold text-white'));
+      report.append(node('p', 'Sample only · not saved, not approved, and unavailable to real handover generation.', 'mt-1 text-xs text-white/45'));
+
+      const source = node('div', undefined, 'mt-4 rounded-xl border border-sky-200/10 bg-sky-300/[0.04] p-3');
+      source.append(node('p', `Designated sample source · ${DEMO_ANALYSIS_FALLBACK.sourceName}`, 'text-xs font-semibold text-sky-100'));
+      source.append(node('pre', DEMO_ANALYSIS_FALLBACK.sourceText, 'mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/20 p-3 font-mono text-xs leading-5 text-white/70'));
+      report.append(source);
+
+      const samples = node('div', undefined, 'mt-3 grid gap-3');
+      DEMO_ANALYSIS_FALLBACK.findings.forEach((finding) => {
+        const card = node('article', undefined, 'rounded-xl border border-amber-100/10 bg-white/[0.03] p-3');
+        card.append(node('span', DEMO_ANALYSIS_FALLBACK.label, 'text-[9px] font-bold tracking-wide text-amber-100/75'));
+        card.append(node('p', finding.category, 'mt-2 text-[10px] font-semibold uppercase tracking-wider text-violet-200/70'));
+        card.append(node('h5', finding.title, 'mt-1 text-sm font-semibold text-white'));
+        card.append(node('p', finding.description, 'mt-1 text-sm leading-5 text-white/60'));
+        card.append(node('p', 'Sample source quote · exact passage from the designated sample document', 'mt-3 text-[10px] text-white/40'));
+        card.append(node('blockquote', `“${finding.quote}”`, 'mt-1 border-l-2 border-amber-200/30 pl-3 text-xs leading-5 text-white/65'));
+        samples.append(card);
+      });
+      report.append(samples);
+      demo.append(report);
+      panel.append(demo);
+    }
     if (canManageCurrentProject()) {
       const retry = node('button', 'Retry failed source', 'mt-3 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50');
       retry.type = 'button'; retry.disabled = state.analysisAdvancing || state.analysisStarting;

@@ -279,6 +279,36 @@ test('Cloudflare provider errors are sanitized and surfaced', async () => {
   }), (error) => error instanceof GeminiAnalysisError && error.status === 503 && !error.message.includes('private provider detail'));
 });
 
+test('Gemini and eligible Cloudflare temporary failures carry only safe provider attempt metadata', async () => {
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => ({ ok: false, status: 503 }),
+  }), (error) => {
+    assert.deepEqual(error.providerAttempts, [
+      { provider: 'gemini', outcome: 'temporary_failure' },
+      { provider: 'cloudflare', outcome: 'temporary_failure' },
+    ]);
+    assert.equal(JSON.stringify(error.providerAttempts).includes(source.extractedText), false);
+    assert.equal(JSON.stringify(error.providerAttempts).includes('test-token'), false);
+    return error instanceof GeminiAnalysisError && error.kind === 'provider';
+  });
+});
+
+test('a permanent Cloudflare fallback failure is recorded as non-eligible for demo fallback', async () => {
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => ({ ok: false, status: 401 }),
+  }), (error) => {
+    assert.deepEqual(error.providerAttempts, [
+      { provider: 'gemini', outcome: 'temporary_failure' },
+      { provider: 'cloudflare', outcome: 'permanent_failure' },
+    ]);
+    return error instanceof GeminiAnalysisError && error.kind === 'provider';
+  });
+});
+
 test('Cloudflare malformed output is rejected', async () => {
   await assert.rejects(extractFindings(source, {
     client: clientFrom([failure(503)]), maxRetries: 0,

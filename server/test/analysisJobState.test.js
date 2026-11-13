@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, canAccessAnalysisJob,
-  nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction,
+  analysisRetryUpdate, isEligibleDemoFallback, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction,
 } from '../src/services/analysisJobState.js';
+import { DEMO_ANALYSIS_FALLBACK } from '../../client/src/data/demoAnalysisFallback.js';
 
 test('job creation reuses an active job rather than creating a duplicate', async () => {
   const existing = { _id: 'persisted-job', status: 'queued' };
@@ -44,6 +45,56 @@ test('analysis failures persist only safe provider and failure categories', () =
   assert.equal(analysisFailureCode({ provider: 'cloudflare', kind: 'invalid_response', message: 'private provider payload' }), 'cloudflare_invalid_response');
   assert.equal(analysisFailureCode({ code: 'ANALYSIS_STEP_BUDGET', message: 'private source text' }), 'step_budget_exceeded');
   assert.equal(analysisFailureCode(new Error('private details')), 'analysis_error');
+});
+
+test('demo fallback is exposed only after terminal Gemini and Cloudflare temporary failures', () => {
+  const job = {
+    status: 'failed', lastErrorKind: 'cloudflare_timeout',
+    lastProviderAttempts: [
+      { provider: 'gemini', outcome: 'temporary_failure' },
+      { provider: 'cloudflare', outcome: 'temporary_failure' },
+    ],
+  };
+  assert.equal(isEligibleDemoFallback(job), true);
+  assert.equal(publicAnalysisJob(job).demoFallbackAvailable, true);
+});
+
+test('demo fallback is unavailable for invalid output, permanent/provider configuration errors, or incomplete provider sequences', () => {
+  const providers = [
+    { status: 'failed', lastErrorKind: 'cloudflare_invalid_response', lastProviderAttempts: [{ provider: 'gemini', outcome: 'temporary_failure' }, { provider: 'cloudflare', outcome: 'invalid_output' }] },
+    { status: 'failed', lastErrorKind: 'cloudflare_configuration', lastProviderAttempts: [{ provider: 'gemini', outcome: 'temporary_failure' }, { provider: 'cloudflare', outcome: 'configuration_failure' }] },
+    { status: 'failed', lastErrorKind: 'gemini_timeout', lastProviderAttempts: [{ provider: 'gemini', outcome: 'temporary_failure' }] },
+    { status: 'retry_wait', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: [{ provider: 'gemini', outcome: 'temporary_failure' }, { provider: 'cloudflare', outcome: 'temporary_failure' }] },
+  ];
+  for (const job of providers) assert.equal(isEligibleDemoFallback(job), false);
+});
+
+test('retry reset hides demo fallback and repeated status rendering does not insert or mutate findings', () => {
+  const retried = { status: 'queued', lastErrorKind: undefined, lastProviderAttempts: undefined };
+  assert.equal(isEligibleDemoFallback(retried), false);
+  const before = structuredClone(retried);
+  for (let index = 0; index < 5; index += 1) assert.equal(isEligibleDemoFallback(retried), false);
+  assert.deepEqual(retried, before);
+});
+
+test('the persisted retry update clears provider eligibility metadata and resumes the same source', () => {
+  const job = { sourceIds: ['source-a', 'source-b'], nextSourceIndex: 1 };
+  const update = analysisRetryUpdate(job, new Date('2026-11-13T00:00:00Z'));
+  assert.equal(update.$set.status, 'queued');
+  assert.equal(update.$set.currentSource, 'source-b');
+  assert.equal(update.$unset.lastProviderAttempts, 1);
+  assert.equal(update.$unset.lastErrorKind, 1);
+});
+
+test('demo fixture quotes exactly match its designated sample document and stay outside approved finding shape', () => {
+  const { sourceText, findings } = DEMO_ANALYSIS_FALLBACK;
+  assert.ok(findings.length > 0);
+  for (const finding of findings) {
+    assert.ok(sourceText.includes(finding.quote), `${finding.title} quote must be present verbatim in sample source`);
+    assert.equal(Object.hasOwn(finding, '_id'), false);
+    assert.equal(Object.hasOwn(finding, 'status'), false);
+  }
+  assert.equal(DEMO_ANALYSIS_FALLBACK.label, 'DEMO DATA — NOT LIVE AI OUTPUT');
 });
 
 test('persisted job state can be recovered after refresh without exposing its lease token', () => {

@@ -5,7 +5,7 @@ import Finding from '../models/Finding.js';
 import Project from '../models/Project.js';
 import Source from '../models/Source.js';
 import { extractFindings, GeminiAnalysisError } from './gemini.js';
-import { analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction } from './analysisJobState.js';
+import { analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, analysisRetryUpdate, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction, safeProviderAttempts } from './analysisJobState.js';
 
 export const ANALYSIS_STEP_BUDGET_MS = 240_000;
 export const ANALYSIS_LEASE_MS = 330_000;
@@ -163,7 +163,7 @@ async function commitSourceStep({ jobId, token, sourceId, findings }) {
           lastProgressAt: new Date(),
           ...(completedAt ? { completedAt } : {}),
         },
-        $unset: { retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, leaseToken: 1, leaseExpiresAt: 1 },
+        $unset: { retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, lastProviderAttempts: 1, leaseToken: 1, leaseExpiresAt: 1 },
       },
       { session },
     );
@@ -195,6 +195,7 @@ async function recordStepFailure(job, token, error, now = new Date()) {
       ...(shouldRetry ? { retryAt: new Date(now.getTime() + backoffMs) } : {}),
       lastErrorKind: analysisFailureCode(error),
       ...(Number.isInteger(error?.status) ? { lastErrorStatus: error.status } : {}),
+      lastProviderAttempts: safeProviderAttempts(error?.providerAttempts),
       currentSource: job.sourceIds[job.nextSourceIndex],
       lastProgressAt: now,
     },
@@ -238,7 +239,7 @@ export async function retryAnalysisJob(jobId) {
   if (job.nextSourceIndex >= job.sourceIds.length) throw new AnalysisJobError('There is no incomplete source to retry.', 409);
   return AnalysisJob.findOneAndUpdate(
     { _id: jobId, status: 'failed', $or: [{ leaseExpiresAt: { $exists: false } }, { leaseExpiresAt: null }, { leaseExpiresAt: { $lte: new Date() } }] },
-    { $set: { status: 'queued', stage: 'queued', attemptCount: 0, retryable: false, lastProgressAt: new Date(), currentSource: job.sourceIds[job.nextSourceIndex] }, $unset: { retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, leaseToken: 1, leaseExpiresAt: 1 } },
+    analysisRetryUpdate(job),
     { new: true },
   );
 }

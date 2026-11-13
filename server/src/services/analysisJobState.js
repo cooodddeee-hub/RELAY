@@ -13,7 +13,40 @@ export function publicAnalysisJob(job, now = new Date()) {
   delete value.leaseExpiresAt;
   value.leaseActive = Boolean(job.leaseExpiresAt && new Date(job.leaseExpiresAt) > now);
   value.elapsedMs = job.startedAt ? Math.max(0, now.getTime() - new Date(job.startedAt).getTime()) : 0;
+  value.demoFallbackAvailable = isEligibleDemoFallback(job);
   return value;
+}
+
+export function isEligibleDemoFallback(job) {
+  if (!job || job.status !== 'failed' || !['cloudflare_provider', 'cloudflare_timeout'].includes(job.lastErrorKind)) return false;
+  const attempts = job.lastProviderAttempts || [];
+  return attempts.length === 2
+    && attempts[0]?.provider === 'gemini' && attempts[0]?.outcome === 'temporary_failure'
+    && attempts[1]?.provider === 'cloudflare' && attempts[1]?.outcome === 'temporary_failure';
+}
+
+export function safeProviderAttempts(attempts) {
+  const providers = ['gemini', 'cloudflare'];
+  const outcomes = ['temporary_failure', 'permanent_failure', 'invalid_output', 'configuration_failure'];
+  if (!Array.isArray(attempts)) return [];
+  return attempts.slice(0, 2).flatMap((attempt) => (
+    providers.includes(attempt?.provider) && outcomes.includes(attempt?.outcome)
+      ? [{ provider: attempt.provider, outcome: attempt.outcome }]
+      : []
+  ));
+}
+
+export function analysisRetryUpdate(job, now = new Date()) {
+  return {
+    $set: {
+      status: 'queued', stage: 'queued', attemptCount: 0, retryable: false,
+      lastProgressAt: now, currentSource: job.sourceIds[job.nextSourceIndex],
+    },
+    $unset: {
+      retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, lastProviderAttempts: 1,
+      leaseToken: 1, leaseExpiresAt: 1,
+    },
+  };
 }
 
 export function analysisJobClaimState(job, now = new Date()) {
