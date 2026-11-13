@@ -5,7 +5,7 @@ import Finding from '../models/Finding.js';
 import Project from '../models/Project.js';
 import Source from '../models/Source.js';
 import { extractFindings, GeminiAnalysisError } from './gemini.js';
-import { analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction } from './analysisJobState.js';
+import { analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction } from './analysisJobState.js';
 
 export const ANALYSIS_STEP_BUDGET_MS = 240_000;
 export const ANALYSIS_LEASE_MS = 330_000;
@@ -193,7 +193,7 @@ async function recordStepFailure(job, token, error, now = new Date()) {
       stage: disposition.stage,
       retryable: disposition.retryable,
       ...(shouldRetry ? { retryAt: new Date(now.getTime() + backoffMs) } : {}),
-      lastErrorKind: retryable ? 'temporary_provider_failure' : 'analysis_failed',
+      lastErrorKind: analysisFailureCode(error),
       ...(Number.isInteger(error?.status) ? { lastErrorStatus: error.status } : {}),
       currentSource: job.sourceIds[job.nextSourceIndex],
       lastProgressAt: now,

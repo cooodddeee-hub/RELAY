@@ -131,9 +131,10 @@ function isTemporaryProviderFailure(error) {
 }
 
 function getGeminiClient(options, apiKey, timeoutMs) {
+  const httpOptions = { timeout: timeoutMs, retryOptions: { attempts: 1 } };
   return options.client || (options.clientFactory
-    ? options.clientFactory({ apiKey, timeout: timeoutMs, maxRetries: 0 })
-    : new GoogleGenAI({ apiKey, timeout: timeoutMs, maxRetries: 0 }));
+    ? options.clientFactory({ apiKey, httpOptions })
+    : new GoogleGenAI({ apiKey, httpOptions }));
 }
 
 async function requestGemini(source, prompt, options, fallbackOccurred) {

@@ -29,6 +29,14 @@ export function analysisFailureDisposition({ retryable, attemptCount, maxAttempt
   return { status: retry ? 'retry_wait' : 'failed', stage: retry ? 'retry_wait' : 'failed', retryable: Boolean(retryable) };
 }
 
+export function analysisFailureCode(error) {
+  if (error?.code === 'ANALYSIS_STEP_BUDGET') return 'step_budget_exceeded';
+  if (error?.name === 'AnalysisJobError' && error.status === 404) return 'source_unavailable';
+  const provider = ['gemini', 'cloudflare'].includes(error?.provider) ? error.provider : null;
+  const kind = ['timeout', 'invalid_response', 'configuration', 'provider'].includes(error?.kind) ? error.kind : null;
+  return provider && kind ? `${provider}_${kind}` : 'analysis_error';
+}
+
 export function canAccessAnalysisJob(project, userId, action = 'read') {
   if (!canReadProject(project, userId)) return false;
   return action === 'read' || canEditProject(project, userId);

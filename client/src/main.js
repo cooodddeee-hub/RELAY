@@ -925,7 +925,24 @@ function renderAnalysisJob() {
     panel.append(node('p', `Retrying after the saved backoff${seconds ? ` · about ${seconds}s` : ''}.`, 'mt-2 text-xs text-amber-200'));
   }
   if (active.status === 'failed') {
-    panel.append(node('p', active.retryable ? 'The current source was not committed. You can retry this source safely; completed sources and findings remain saved.' : 'The current source was not committed. Check the provider or source, then retry when ready.', 'mt-3 text-sm leading-5 text-rose-200'));
+    const failureMessages = {
+      gemini_timeout: 'Gemini did not respond before its request timeout. No findings were saved for this source.',
+      cloudflare_timeout: 'The Cloudflare fallback did not respond before its request timeout. No findings were saved for this source.',
+      gemini_provider: 'The Gemini request failed after its retry policy. No findings were saved for this source.',
+      cloudflare_provider: 'The Cloudflare fallback request failed after its retry policy. No findings were saved for this source.',
+      gemini_invalid_response: 'Gemini output failed RELAY validation. No findings were saved for this source.',
+      cloudflare_invalid_response: 'Cloudflare output failed RELAY schema or evidence validation. No findings were saved for this source.',
+      gemini_configuration: 'Gemini is not configured correctly for this deployment.',
+      cloudflare_configuration: 'Cloudflare fallback is not configured correctly for this deployment.',
+      step_budget_exceeded: 'Analysis exceeded its safe processing time. No findings were saved for this source.',
+      source_unavailable: 'The source could not be read for analysis. No findings were saved for this source.',
+      analysis_error: 'Analysis stopped before this source was committed. Check provider and function logs for the failure category.',
+    };
+    const reason = failureMessages[active.lastErrorKind] || (active.lastErrorKind === 'temporary_provider_failure'
+      ? 'A temporary provider failure exhausted the automatic retry policy. No findings were saved for this source.'
+      : 'The current source was not committed. Check the provider or source, then retry when ready.');
+    panel.append(node('p', reason, 'mt-3 text-sm leading-5 text-rose-200'));
+    if (Number.isInteger(active.lastErrorStatus)) panel.append(node('p', `Sanitized failure status: ${active.lastErrorStatus}`, 'mt-2 text-xs text-rose-100/55'));
     if (canManageCurrentProject()) {
       const retry = node('button', 'Retry failed source', 'mt-3 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50');
       retry.type = 'button'; retry.disabled = state.analysisAdvancing || state.analysisStarting;

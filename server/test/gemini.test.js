@@ -15,15 +15,15 @@ function clientFrom(responses, onCall = () => {}) {
   };
 }
 
-test('uses a short SDK timeout with built-in retries disabled', async () => {
+test('configures the SDK request timeout and disables its built-in retries', async () => {
   let configured;
   const result = await extractFindings(source, {
     timeoutMs: 12_345,
     clientFactory: (config) => { configured = config; return clientFrom([response]); },
     sleep: async () => {},
   });
-  assert.equal(configured.timeout, 12_345);
-  assert.equal(configured.maxRetries, 0);
+  assert.equal(configured.httpOptions.timeout, 12_345);
+  assert.deepEqual(configured.httpOptions.retryOptions, { attempts: 1 });
   assert.equal(result.length, 1);
   assert.equal(result[0].evidence[0].quote, 'The team decided to ship the beta in June.');
   assert.equal(result[0].evidence[0].verificationStatus, 'verified');

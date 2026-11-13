@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, canAccessAnalysisJob,
+  analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, canAccessAnalysisJob,
   nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction,
 } from '../src/services/analysisJobState.js';
 
@@ -37,6 +37,13 @@ test('temporary provider failures enter bounded retry state; permanent failures 
   assert.deepEqual(analysisFailureDisposition({ retryable: true, attemptCount: 1 }), { status: 'retry_wait', stage: 'retry_wait', retryable: true });
   assert.deepEqual(analysisFailureDisposition({ retryable: true, attemptCount: 3 }), { status: 'failed', stage: 'failed', retryable: true });
   assert.deepEqual(analysisFailureDisposition({ retryable: false, attemptCount: 1 }), { status: 'failed', stage: 'failed', retryable: false });
+});
+
+test('analysis failures persist only safe provider and failure categories', () => {
+  assert.equal(analysisFailureCode({ provider: 'gemini', kind: 'timeout', message: 'private document text' }), 'gemini_timeout');
+  assert.equal(analysisFailureCode({ provider: 'cloudflare', kind: 'invalid_response', message: 'private provider payload' }), 'cloudflare_invalid_response');
+  assert.equal(analysisFailureCode({ code: 'ANALYSIS_STEP_BUDGET', message: 'private source text' }), 'step_budget_exceeded');
+  assert.equal(analysisFailureCode(new Error('private details')), 'analysis_error');
 });
 
 test('persisted job state can be recovered after refresh without exposing its lease token', () => {
