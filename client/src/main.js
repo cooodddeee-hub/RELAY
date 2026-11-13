@@ -64,19 +64,31 @@ const clear = (el) => el?.replaceChildren();
 
 async function api(path, options = {}) {
   if (state.mode === 'demo') throw new Error('Demo mode does not send requests to the RELAY API.');
+  const method = (options.method || 'GET').toUpperCase();
+  const traceAnalysisAdvance = method === 'POST' && /^\/analysis-jobs\/[^/]+\/advance$/.test(path);
+  const diagnostic = (status, errorType) => {
+    if (traceAnalysisAdvance) console.info('[RELAY ANALYSIS REQUEST]', { method, path, status, errorType });
+  };
   const headers = new Headers(options.headers || {});
   if (state.token) headers.set('Authorization', `Bearer ${state.token}`);
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   let response;
   try { response = await fetch(`${API_URL}${path}`, { ...options, headers }); }
-  catch { throw new Error('Cannot reach the RELAY API. Check that the backend is running.'); }
-  const data = await response.json().catch(() => ({}));
+  catch (error) {
+    diagnostic(null, error instanceof TypeError ? 'TypeError' : 'FetchError');
+    throw new Error('Cannot reach the RELAY API. Check that the backend is running.');
+  }
+  let data = {};
+  try { data = await response.json(); }
+  catch { diagnostic(response.status, 'InvalidJSON'); }
   if (!response.ok) {
+    diagnostic(response.status, 'HTTPError');
     if (response.status === 401 && state.token) expireSession();
     const error = new Error(data.message || `Request failed (${response.status})`);
     error.status = response.status;
     throw error;
   }
+  diagnostic(response.status, 'none');
   return data;
 }
 
