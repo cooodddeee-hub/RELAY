@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { createHash, randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
 import { requireAuth } from '../middleware/auth.js';
 import { requireProjectAccess, requireProjectEditor } from '../middleware/projectAccess.js';
@@ -7,125 +6,56 @@ import Project from '../models/Project.js';
 import Source from '../models/Source.js';
 import Finding from '../models/Finding.js';
 import ReviewHistory from '../models/ReviewHistory.js';
-import { extractFindings } from '../services/gemini.js';
+import { AnalysisJobError, advanceAnalysisJob, createOrGetAnalysisJob, getAnalysisJob, getProjectAnalysisJob, retryAnalysisJob } from '../services/analysisJobs.js';
 import { assertCanReviewProject, ReviewWorkflowError, runReviewAction } from '../services/reviewWorkflow.js';
 import { canReadProject } from '../services/projectPermissions.js';
 import { logError } from '../utils/safeLogger.js';
+import { canAccessAnalysisJob, publicAnalysisJob } from '../services/analysisJobState.js';
 
 const router = Router();
 router.use(requireAuth);
-const LOCK_MS = 10 * 60 * 1000;
-const SOURCE_CONCURRENCY = 2;
-
-function analysisKey(projectId, sourceId, title) {
-  const normalizedTitle = String(title).normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
-  return createHash('sha256').update(`${projectId}:${sourceId}:${normalizedTitle}`).digest('hex');
-}
-
-async function saveSourceAnalysisOnce(projectId, source, items) {
-  const session = await mongoose.startSession();
-  let savedFindings = [];
-  try {
-    await session.withTransaction(async () => {
-      const currentSource = await Source.findById(source._id).select('analysisCompletedAt').session(session);
-      if (!currentSource || currentSource.analysisCompletedAt) { savedFindings = []; return; }
-
-      const saved = [];
-      for (const item of items) {
-        const key = analysisKey(projectId, source._id, item.title);
-        const legacy = await Finding.findOne({ project: projectId, 'evidence.source': source._id, title: item.title }).session(session);
-        if (legacy) {
-          if (!legacy.analysisKey) {
-            legacy.analysisKey = key;
-            try { await legacy.save({ session }); }
-            catch (error) { if (error?.code !== 11000) throw error; }
-          }
-          saved.push(legacy);
-          continue;
-        }
-        saved.push(await Finding.findOneAndUpdate(
-          { analysisKey: key },
-          { $setOnInsert: { project: projectId, analysisKey: key, ...item, status: 'pending' } },
-          { upsert: true, new: true, setDefaultsOnInsert: true, session },
-        ));
-      }
-      await Source.updateOne({ _id: source._id, project: projectId }, { $set: { analysisCompletedAt: new Date() } }, { session });
-      savedFindings = saved;
-    });
-    return savedFindings;
-  } finally {
-    await session.endSession();
-  }
-}
-
 router.post('/projects/:id/analyze', requireProjectAccess, requireProjectEditor, async (req, res, next) => {
-  const projectId = req.project._id;
-  const projectIdText = String(projectId);
-  const lockToken = randomUUID();
-  const startedAt = Date.now();
-  let locked = false;
-
   try {
-    const lock = await Project.updateOne(
-      { _id: projectId, $or: [{ analysisLockExpiresAt: { $exists: false } }, { analysisLockExpiresAt: { $lte: new Date() } }] },
-      { $set: { analysisLockToken: lockToken, analysisLockExpiresAt: new Date(Date.now() + LOCK_MS) } },
-    );
-    if (lock.modifiedCount !== 1) return res.status(409).json({ message: 'Analysis is already running for this project. Wait for it to finish before retrying.' });
-    locked = true;
-
-    const processedSources = await Source.find({ project: projectId, status: 'processed' }).select('+analysisCompletedAt').sort({ createdAt: 1 });
-    if (!processedSources.length) return res.status(400).json({ message: 'Upload and process at least one document first.' });
-    const sources = processedSources.filter((source) => !source.analysisCompletedAt);
-    if (!sources.length) {
-      const findings = await Finding.find({ project: projectId }).populate('evidence.source', 'originalName');
-      return res.json({ findings, message: 'All processed sources have already been analyzed.' });
-    }
-
-    const analyzed = [];
-    for (let offset = 0; offset < sources.length; offset += SOURCE_CONCURRENCY) {
-      const renewedLock = await Project.updateOne(
-        { _id: projectId, analysisLockToken: lockToken },
-        { $set: { analysisLockExpiresAt: new Date(Date.now() + LOCK_MS) } },
-      );
-      if (renewedLock.modifiedCount !== 1) {
-        const lockError = new Error('Analysis lock expired before the next batch.');
-        lockError.status = 409;
-        throw lockError;
-      }
-      const batch = sources.slice(offset, offset + SOURCE_CONCURRENCY);
-      const results = await Promise.allSettled(batch.map(async (source) => {
-        const items = await extractFindings(source);
-        return saveSourceAnalysisOnce(projectId, source, items);
-      }));
-      for (const result of results) if (result.status === 'fulfilled') analyzed.push(...result.value);
-      const failure = results.find((result) => result.status === 'rejected');
-      if (failure) throw failure.reason;
-    }
-
-    console.info(JSON.stringify({ level: 'info', operation: 'analysis.completed', projectId: projectIdText, sourceCount: sources.length, findingCount: analyzed.length, durationMs: Date.now() - startedAt }));
-    return res.json({ findings: analyzed, message: 'AI findings created; human review is required' });
+    const job = await createOrGetAnalysisJob({ projectId: req.project._id, actorId: req.user._id });
+    if (!job) return res.status(200).json({ job: null, alreadyAnalyzed: true, message: 'All processed sources have already been analyzed.' });
+    return res.status(job.status === 'queued' && !job.startedAt ? 202 : 200).json({ job: publicAnalysisJob(job), message: 'Analysis job is saved. Advance it one source at a time while this workspace is open.' });
   } catch (error) {
-    logError('analysis.project', error, { projectId: projectIdText, durationMs: Date.now() - startedAt });
-    if (Number.isInteger(error?.status) && error.status >= 400 && error.status < 600) {
-      if (error.status === 429 || error.status === 503) res.set('Retry-After', '2');
-      const message = error.status === 429
-        ? 'Gemini rate limit reached. Wait briefly and retry; uploaded sources remain saved and repeated findings are deduplicated.'
-        : error.status === 503
-          ? 'Gemini is temporarily unavailable. Retry shortly; uploaded sources remain saved and repeated findings are deduplicated.'
-          : error.status === 504
-            ? 'Gemini analysis timed out. Retry shortly; uploaded sources remain saved and repeated findings are deduplicated.'
-            : error.status === 502
-              ? 'Gemini returned an unusable analysis response. No unsupported findings were added for that response; retry after checking server logs.'
-              : 'Analysis could not be completed. Uploaded sources remain saved; retry is safe.';
-      return res.status(error.status).json({ message });
-    }
-    return res.status(500).json({ message: 'Analysis failed because of a server error. Uploaded sources remain saved; retry is safe.' });
-  } finally {
-    if (locked) {
-      try { await Project.updateOne({ _id: projectId, analysisLockToken: lockToken }, { $unset: { analysisLockToken: 1, analysisLockExpiresAt: 1 } }); }
-      catch (error) { logError('analysis.releaseLock', error, { projectId: projectIdText }); }
-    }
+    if (error instanceof AnalysisJobError) return res.status(error.status).json({ message: error.message });
+    logError('analysis.job.create', error, { projectId: String(req.project._id) });
+    return next(error);
   }
+});
+
+router.get('/projects/:id/analysis-job', requireProjectAccess, async (req, res, next) => {
+  try { return res.json({ job: publicAnalysisJob(await getProjectAnalysisJob(req.project._id)) }); }
+  catch (error) { return next(error); }
+});
+
+async function accessibleAnalysisJob(req, res, next) {
+  try {
+    if (!/^[a-f\d]{24}$/i.test(req.params.jobId || '')) return res.status(400).json({ message: 'Invalid analysis job ID.' });
+    const job = await getAnalysisJob(req.params.jobId);
+    if (!job) return res.status(404).json({ message: 'Analysis job not found.' });
+    const project = await Project.findById(job.project);
+    if (!project || !canAccessAnalysisJob(project, req.user._id, 'read')) return res.status(403).json({ message: 'You do not have access to this analysis job.' });
+    req.analysisJob = job; req.project = project;
+    return next();
+  } catch (error) { return next(error); }
+}
+
+router.get('/analysis-jobs/:jobId', accessibleAnalysisJob, (req, res) => res.json({ job: publicAnalysisJob(req.analysisJob) }));
+function requireAnalysisEditor(req, res, next) {
+  if (!canAccessAnalysisJob(req.project, req.user._id, 'advance')) return res.status(403).json({ message: 'Only project owners and editors can advance analysis.' });
+  return next();
+}
+
+router.post('/analysis-jobs/:jobId/advance', accessibleAnalysisJob, requireAnalysisEditor, async (req, res, next) => {
+  try { return res.json({ job: publicAnalysisJob(await advanceAnalysisJob(req.analysisJob._id)) }); }
+  catch (error) { if (error instanceof AnalysisJobError) return res.status(error.status).json({ message: error.message }); return next(error); }
+});
+router.post('/analysis-jobs/:jobId/retry', accessibleAnalysisJob, requireAnalysisEditor, async (req, res, next) => {
+  try { return res.json({ job: publicAnalysisJob(await retryAnalysisJob(req.analysisJob._id)) }); }
+  catch (error) { if (error instanceof AnalysisJobError) return res.status(error.status).json({ message: error.message }); return next(error); }
 });
 
 router.get('/projects/:id/findings', requireProjectAccess, async (req, res, next) => {

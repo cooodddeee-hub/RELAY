@@ -77,9 +77,9 @@ Source listing omits extracted text and storage paths. Authorized project member
 
 ## Gemini analysis and finding generation
 
-An owner or editor starts analysis for a project. The API selects processed sources that have not already been analyzed, takes a project-level lock, and processes sources with limited concurrency. The Gemini service sends at most the first 45,000 characters of each source’s extracted text and requests structured findings in the supported categories. The implementation uses a 30-second provider request timeout and up to two retries for retryable errors, including timeouts, HTTP 408/429/5xx, and recognized network failures.
+An owner or editor starts analysis for a project. The API selects processed sources that have not already been analyzed, takes a project-level lock, and processes sources with limited concurrency. Gemini remains primary. It receives at most the first 45,000 characters of each source’s extracted text, requests structured findings in the supported categories, uses a 30-second timeout, and retries temporary failures up to two times with backoff. On exhausted temporary HTTP 408, 429, 500, 502, 503, or 504 failures, recognized network failures, or timeouts, the service makes bounded retries to Cloudflare Workers AI using `@cf/openai/gpt-oss-20b`. Cloudflare credentials/authentication errors, input errors, and malformed or unsupported output do not trigger another provider fallback.
 
-Valid responses create pending findings. A source analysis marker and finding writes are protected by a MongoDB transaction and stable analysis keys/legacy lookup to prevent duplicate findings on retry. A failed Gemini request does not delete the uploaded source. Gemini model availability and quotas depend on server configuration and the provider account.
+Gemini responses retain the existing quote-verification behavior. Cloudflare output must match the finding contract, and every fallback quote must verify against the original extracted text before it is accepted; fallback section/page metadata is omitted because it is not independently verified. Malformed fallback data or unsupported quotes produce a sanitized error and no findings for that source. Accepted findings remain pending. Provider diagnostics record provider, request start/completion, duration, and fallback state only; they do not log prompts, extracted text, credentials, or signed URLs. A live synthetic check of GPT-OSS 20B returned HTTP 200 but no usable message content for RELAY’s analysis prompt, so Gemini remains primary until candidate output passes validation. A source analysis marker and finding writes are protected by a MongoDB transaction and stable analysis keys/legacy lookup to prevent duplicate findings on retry. A provider failure does not delete the uploaded source. Provider availability, quota, output quality, and model access depend on configuration and provider accounts.
 
 ```mermaid
 flowchart TD
@@ -88,10 +88,13 @@ flowchart TD
     Extract --> Request[Owner/editor starts project analysis]
     Request --> Lock[Acquire project analysis lock]
     Lock --> Gemini[Call Gemini for unprocessed sources]
-    Gemini --> Parse[Parse allowed finding categories]
+    Gemini -->|Valid response| Parse[Parse allowed finding categories]
+    Gemini -->|Temporary failure after retries| Cloudflare[Bounded Cloudflare Workers AI retries]
+    Cloudflare --> Parse
+    Cloudflare -->|Malformed or unsupported evidence| Error[Sanitized analysis error; source remains stored]
     Parse --> Verify[Compare each returned quote to stored source text]
     Verify --> Save[Save findings as pending with analysis key]
-    Gemini -->|Retryable failure after retries| Error[Sanitized analysis error; source remains stored]
+    Gemini -->|Permanent failure or fallback failure| Error
 ```
 
 ## Evidence verification
@@ -162,7 +165,7 @@ The diagram shows conceptual references; some relationships are stored as Object
 ## Security considerations and current limitations
 
 - API routes require bearer authentication except `GET /api/health`; project data is additionally protected by membership/role checks.
-- `JWT_SECRET`, `MONGODB_URI`, and `GEMINI_API_KEY` are server configuration and must not be exposed to the browser.
+- `JWT_SECRET`, `MONGODB_URI`, `GEMINI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_API_TOKEN` are server configuration and must not be exposed to the browser.
 - Express uses Helmet, configured CORS, a 2 MB JSON body limit, and a global rate limit of 300 requests per 15 minutes. Error responses hide internal details for 5xx errors; structured logs redact common credential patterns.
 - Local file storage requires private durable storage and retention controls for production.
 - Browser tokens are stored in local storage; the app does not use HttpOnly session cookies.

@@ -7,6 +7,7 @@ import projectRoutes from './routes/projects.js';
 import sourceRoutes from './routes/sources.js';
 import findingRoutes from './routes/findings.js';
 import handoverRoutes from './routes/handovers.js';
+import { ensureDatabase } from './middleware/ensureDatabase.js';
 import { logError } from './utils/safeLogger.js';
 
 const app=express();
@@ -14,7 +15,8 @@ app.use(helmet({crossOriginResourcePolicy:{policy:'cross-origin'}}));
 app.use(cors({origin:process.env.CLIENT_URL?.split(',') || 'http://localhost:5173'}));
 app.use(express.json({limit:'2mb'}));
 app.use(rateLimit({windowMs:15*60*1000,max:300}));
-app.get('/api/health',(_req,res)=>res.json({status:'ok',service:'RELAY API'}));
+app.get('/api/health',ensureDatabase,(_req,res)=>res.json({status:'ok',service:'RELAY API'}));
+app.use('/api', ensureDatabase);
 app.use('/api/auth',authRoutes);
 app.use('/api/projects',projectRoutes);
 app.use('/api',sourceRoutes);

@@ -90,7 +90,7 @@ body{background:#060A16;color:#E2E8F0}
       <h2 class="text-white text-[26px] font-semibold">Welcome back</h2>
       <p class="text-white/50 text-sm mt-1">Sign in to your workspace to continue.</p>
 
-      <form onsubmit="login(event)" class="mt-6 space-y-4">
+      <form id="authForm" class="mt-6 space-y-4">
         <div id="registerNameField" class="hidden"><label class="text-xs text-white/60 font-medium" for="authName">Name</label><input id="authName" type="text" autocomplete="name" maxlength="100" class="mt-1.5 w-full bg-[#0F1832] border border-white/10 rounded-xl px-3 py-3 text-sm text-white focus:outline-none focus:border-violet-500/50" placeholder="Your name"></div>
         <div>
           <label class="text-xs text-white/60 font-medium">Work email</label>
@@ -103,7 +103,7 @@ body{background:#060A16;color:#E2E8F0}
           <label class="text-xs text-white/60 font-medium">Password</label>
           <div class="mt-1.5 relative">
             <i data-lucide="lock" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-white/30"></i>
-            <input id="authPass" type="password" autocomplete="current-password" minlength="8" maxlength="128" required class="w-full bg-[#0F1832] border border-white/10 rounded-xl pl-10 pr-10 py-3 text-sm text-white focus:outline-none focus:border-violet-500/50">
+            <input id="authPass" type="password" autocomplete="current-password" required class="w-full bg-[#0F1832] border border-white/10 rounded-xl pl-10 pr-10 py-3 text-sm text-white focus:outline-none focus:border-violet-500/50">
             <button type="button" onclick="togglePass()" class="absolute right-3 top-1/2 -translate-y-1/2"><i data-lucide="eye" class="w-4 h-4 text-white/30"></i></button>
           </div>
           <div class="flex justify-between mt-2">
@@ -196,7 +196,7 @@ body{background:#060A16;color:#E2E8F0}
             <p id="dashboardSummary" class="text-white/50 text-sm mt-2 max-w-[620px]">Loading your project workspace…</p>
           </div>
           <div class="flex gap-2">
-            <button id="analyzeTopButton" onclick="simulateAnalyze()" class="bg-white text-[#060A16] font-semibold px-4 py-2.5 rounded-full text-sm flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4"></i> Analyze New Sources</button>
+            <button id="analyzeTopButton" onclick="simulateAnalyze()" class="bg-white text-[#060A16] font-semibold px-4 py-2.5 rounded-full text-sm flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4"></i><span>Analyze New Sources</span></button>
             <button onclick="navigate('handover')" class="bg-[#111B34] border border-white/15 text-white px-4 py-2.5 rounded-full text-sm flex items-center gap-2"><i data-lucide="file-text" class="w-4 h-4"></i> View Handover</button>
           </div>
         </div>
@@ -287,7 +287,7 @@ body{background:#060A16;color:#E2E8F0}
       <!-- SOURCES VIEW -->
       <section id="view-sources" class="hidden space-y-5 fade-in">
         <div class="flex flex-wrap items-center justify-between gap-3">
-          <div><h1 class="text-2xl font-semibold text-white">Sources</h1><p class="text-sm text-white/40">Upload and manage evidence. All documents stay private.</p><p id="sourcePermissionNote" class="text-xs text-white/35 mt-1"></p></div>
+          <div><h1 class="text-2xl font-semibold text-white">Sources</h1><p class="text-sm text-white/40">Upload and manage evidence. All documents stay private.</p><p id="sourcePermissionNote" class="text-xs text-white/35 mt-1"></p><p id="sourceUploadStatus" class="text-xs mt-1" role="status" aria-live="polite"></p></div>
           <div class="flex gap-2">
             <select id="sourceFilter" onchange="renderSources()" class="bg-[#111B34] border border-white/10 rounded-full px-4 py-2 text-sm text-white"><option value="all">All statuses</option><option value="Processed">Processed</option><option value="Uploaded">Uploaded</option><option value="Processing">Processing</option><option value="Failed">Failed</option></select>
             <label id="sourceUploadLabel" class="bg-white text-[#060A16] font-semibold px-4 py-2 rounded-full text-sm cursor-pointer flex items-center gap-2"><i data-lucide="upload" class="w-4 h-4"></i> Upload<input type="file" accept=".pdf,.docx,.txt,.md" class="hidden" multiple onchange="handleUpload(this.files)"></label>
@@ -307,8 +307,9 @@ body{background:#060A16;color:#E2E8F0}
       <section id="view-findings" class="hidden space-y-5 fade-in">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div><h1 class="text-2xl font-semibold text-white">AI Findings</h1><p class="text-sm text-white/40">Every finding links to source evidence. AI never auto-approves.</p></div>
-          <button id="analyzeFindingsButton" onclick="simulateAnalyze()" class="bg-violet-600 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4"></i> Re-analyze with Gemini</button>
+          <button id="analyzeFindingsButton" onclick="simulateAnalyze()" class="bg-violet-600 text-white px-4 py-2 rounded-full text-sm font-medium flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4"></i><span>Analyze New Sources</span></button>
         </div>
+        <div id="analysisJobStatus" class="hidden rounded-2xl border border-white/10 bg-white/[0.03] p-4" aria-live="polite"></div>
         <div class="flex flex-wrap gap-2" id="categoryFilters"></div>
         <div class="flex gap-2">
           <div class="relative flex-1"><i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-white/30"></i><input id="findingSearch" oninput="renderFindings()" placeholder="Search findings, evidence, tags…" class="w-full bg-[#111B34] border border-white/10 rounded-full pl-10 pr-4 py-2.5 text-sm text-white"></div>

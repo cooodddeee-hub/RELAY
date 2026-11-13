@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractFindings, GeminiAnalysisError } from '../src/services/gemini.js';
+import { extractFindings, GeminiAnalysisError, CLOUDFLARE_MODEL, DEFAULT_ANALYSIS_PROVIDER } from '../src/services/gemini.js';
 import { sanitizeLogText } from '../src/utils/safeLogger.js';
 
 const source = { _id: 'source-test-id', originalName: 'handover.txt', extractedText: 'The team decided to ship the beta in June.' };
@@ -58,16 +58,20 @@ test('retries 429 rate limits and succeeds without inventing output', async () =
   assert.equal(result.length, 1);
 });
 
-test('maps exhausted provider timeouts to 504 and stops after the configured retry', async () => {
+test('exhausted Gemini timeouts invoke Cloudflare after the configured retry', async () => {
   const timeout = Object.assign(new Error('request timed out'), { name: 'APIConnectionTimeoutError' });
   const client = clientFrom([timeout, timeout]);
   const delays = [];
-  await assert.rejects(
-    extractFindings(source, { client, maxRetries: 1, sleep: async (delay) => delays.push(delay) }),
-    (error) => error instanceof GeminiAnalysisError && error.status === 504 && error.kind === 'timeout',
-  );
+  let fallbackCalls = 0;
+  const result = await extractFindings(source, {
+    client, maxRetries: 1, sleep: async (delay) => delays.push(delay),
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
+  });
   assert.equal(client.calls, 2);
   assert.deepEqual(delays, [500]);
+  assert.equal(fallbackCalls, 1);
+  assert.equal(result[0].evidence[0].verificationStatus, 'verified');
 });
 
 test('does not retry permanent provider errors or fabricate findings', async () => {
@@ -88,6 +92,16 @@ test('does not turn malformed provider output into findings', async () => {
   assert.equal(client.calls, 1);
 });
 
+test('malformed Gemini output does not trigger Cloudflare fallback', async () => {
+  let fallbackCalls = 0;
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([{ text: 'not JSON' }]),
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
+  }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response');
+  assert.equal(fallbackCalls, 0);
+});
+
 test('sanitizes credentials and request tokens before error logging', () => {
   const value = 'API_KEY=AIzaSyAbcdefghijklmnopqrstuvwxyz012345 eyJabcdefghij.klmnopqrst.uvwxyz12345 Bearer sensitive-token\nauthorization: Bearer header-token\ncookie: sid=cookie-secret; jwt=another-secret\nmongodb+srv://user:pass@host/db';
   const safe = sanitizeLogText(value);
@@ -95,4 +109,236 @@ test('sanitizes credentials and request tokens before error logging', () => {
   assert.match(safe, /REDACTED_API_KEY/);
   assert.match(safe, /REDACTED_JWT/);
   assert.match(safe, /REDACTED_MONGODB_URI/);
+});
+
+function cloudflareResponse(findings = [{ category: 'Decision', title: 'Ship the beta', description: 'The source says the beta will ship in June.', confidence: 0.9, quote: 'The team decided to ship the beta in June.' }]) {
+  return { ok: true, status: 200, json: async () => ({ success: true, result: { response: JSON.stringify({ findings }) } }) };
+}
+
+test('Gemini succeeds without calling Cloudflare', async () => {
+  let fallbackCalls = 0;
+  const result = await extractFindings(source, {
+    client: clientFrom([response]),
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => { fallbackCalls += 1; throw new Error('must not be called'); },
+  });
+  assert.equal(result.length, 1);
+  assert.equal(fallbackCalls, 0);
+});
+
+test('Cloudflare candidate is configured with the selected model and is not enabled as primary before live validation', () => {
+  assert.equal(CLOUDFLARE_MODEL, '@cf/openai/gpt-oss-20b');
+  assert.equal(DEFAULT_ANALYSIS_PROVIDER, 'gemini');
+});
+
+test('Cloudflare primary validates schema, exact evidence, and source association', async () => {
+  let request;
+  const result = await extractFindings(source, {
+    primaryProvider: 'cloudflare',
+    cloudflareAccountId: 'test-account',
+    cloudflareApiToken: 'test-token',
+    cloudflareMaxRetries: 0,
+    cloudflareFetch: async (url, options) => {
+      request = { url, options };
+      return cloudflareResponse();
+    },
+    client: clientFrom([failure(503)]),
+  });
+  assert.match(request.url, new RegExp('/ai/run/' + CLOUDFLARE_MODEL.replaceAll('/', '\\/').replaceAll('.', '\\.') + '$'));
+  assert.equal(request.options.headers.Authorization, 'Bearer test-token');
+  assert.equal(result.length, 1);
+  assert.equal(result[0].evidence[0].source, source._id);
+  assert.equal(result[0].evidence[0].verificationStatus, 'verified');
+  assert.equal(result[0].evidence[0].matchedText, source.extractedText);
+});
+
+test('provider diagnostics report timing and fallback state without source text or credentials', async () => {
+  const diagnostics = [];
+  const originalInfo = console.info;
+  console.info = (line) => diagnostics.push(JSON.parse(line));
+  try {
+    await extractFindings(source, {
+      primaryProvider: 'cloudflare',
+      cloudflareAccountId: 'test-account',
+      cloudflareApiToken: 'test-token',
+      cloudflareMaxRetries: 0,
+      cloudflareFetch: async () => cloudflareResponse(),
+    });
+  } finally {
+    console.info = originalInfo;
+  }
+  const requestEvents = diagnostics.filter((event) => event.operation === 'analysis.providerRequest' && event.provider === 'cloudflare');
+  assert.equal(requestEvents.some((event) => event.phase === 'started' && event.fallbackOccurred === false), true);
+  assert.equal(requestEvents.some((event) => event.phase === 'completed' && event.success === true && Number.isFinite(event.durationMs)), true);
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(serialized.includes(source.extractedText), false);
+  assert.equal(serialized.includes('test-token'), false);
+  assert.equal(serialized.includes('test-account'), false);
+});
+
+test('Cloudflare rejects fabricated evidence without falling back to Gemini', async () => {
+  let geminiCalls = 0;
+  await assert.rejects(extractFindings(source, {
+    primaryProvider: 'cloudflare',
+    cloudflareAccountId: 'test-account',
+    cloudflareApiToken: 'test-token',
+    cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => cloudflareResponse([{ category: 'Decision', title: 'Invented', description: 'Unsupported.', quote: 'The team chose a November release.' }]),
+    client: { models: { generateContent: async () => { geminiCalls += 1; return response; } } },
+  }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response' && /verified against the source/.test(error.message));
+  assert.equal(geminiCalls, 0);
+});
+
+test('Cloudflare retries temporary errors and falls back to Gemini after exhaustion', async () => {
+  let cloudflareCalls = 0;
+  const delays = [];
+  const result = await extractFindings(source, {
+    primaryProvider: 'cloudflare',
+    cloudflareAccountId: 'test-account',
+    cloudflareApiToken: 'test-token',
+    cloudflareMaxRetries: 1,
+    cloudflareFetch: async () => { cloudflareCalls += 1; return { ok: false, status: 503 }; },
+    client: clientFrom([response]),
+    maxRetries: 0,
+    sleep: async (delay) => delays.push(delay),
+  });
+  assert.equal(cloudflareCalls, 2);
+  assert.deepEqual(delays, [500]);
+  assert.equal(result[0].evidence[0].source, source._id);
+});
+
+test('Cloudflare authentication and permanent response failures do not fall back', async () => {
+  let geminiCalls = 0;
+  await assert.rejects(extractFindings(source, {
+    primaryProvider: 'cloudflare',
+    cloudflareAccountId: 'test-account',
+    cloudflareApiToken: 'test-token',
+    cloudflareMaxRetries: 2,
+    cloudflareFetch: async () => ({ ok: false, status: 401 }),
+    client: { models: { generateContent: async () => { geminiCalls += 1; return response; } } },
+  }), (error) => error instanceof GeminiAnalysisError && error.provider === 'cloudflare');
+  assert.equal(geminiCalls, 0);
+});
+
+for (const status of [500, 502, 503, 504, 429]) {
+  test(`Gemini ${status} exhaustion invokes Cloudflare and returns verified findings`, async () => {
+    let request;
+    const result = await extractFindings(source, {
+      client: clientFrom([failure(status)]), maxRetries: 0,
+      cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+      cloudflareFetch: async (url, options) => { request = { url, options }; return cloudflareResponse(); },
+    });
+    assert.ok(request.url.endsWith('/ai/run/' + CLOUDFLARE_MODEL));
+    assert.equal(request.options.headers.Authorization, 'Bearer test-token');
+    assert.match(JSON.parse(request.options.body).messages[0].content, /The team decided to ship the beta in June\./);
+    assert.equal(result[0].evidence[0].verificationStatus, 'verified');
+    assert.equal(result[0].evidence[0].source, source._id);
+  });
+}
+
+for (const status of [401, 403]) {
+  test(`Gemini HTTP ${status} authentication/permission failures do not invoke Cloudflare`, async () => {
+    let fallbackCalls = 0;
+    await assert.rejects(extractFindings(source, {
+      client: clientFrom([failure(status, 'auth or permission failure')]), maxRetries: 0,
+      cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+      cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
+    }), (error) => error instanceof GeminiAnalysisError && error.providerStatus === status);
+    assert.equal(fallbackCalls, 0);
+  });
+}
+
+test('Gemini network failures invoke Cloudflare after retry budget', async () => {
+  const networkError = Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' });
+  let fallbackCalls = 0;
+  const result = await extractFindings(source, {
+    client: clientFrom([networkError]), maxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
+  });
+  assert.equal(fallbackCalls, 1);
+  assert.equal(result[0].evidence[0].verificationStatus, 'verified');
+});
+
+test('unclassified Gemini application errors do not invoke Cloudflare', async () => {
+  let fallbackCalls = 0;
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([new TypeError('unexpected application failure')]), maxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
+  }), (error) => error instanceof GeminiAnalysisError && error.provider === 'gemini');
+  assert.equal(fallbackCalls, 0);
+});
+
+test('Cloudflare provider errors are sanitized and surfaced', async () => {
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareMaxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => ({ ok: false, status: 500, json: async () => ({ errors: [{ message: 'private provider detail' }] }) }),
+  }), (error) => error instanceof GeminiAnalysisError && error.status === 503 && !error.message.includes('private provider detail'));
+});
+
+test('Cloudflare malformed output is rejected', async () => {
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareMaxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => ({ ok: true, status: 200, json: async () => ({ success: true, result: { response: 'not JSON' } }) }),
+  }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response');
+});
+
+test('accepts Cloudflare structured findings objects and applies strict evidence validation', async () => {
+  const findings = [{ category: 'Decision', title: 'Ship the beta', description: 'The team chose a June beta launch.', quote: 'The team decided to ship the beta in June.' }];
+  const result = await extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => ({ ok: true, status: 200, json: async () => ({ success: true, result: { response: { findings } } }) }),
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].evidence[0].verificationStatus, 'verified');
+  assert.equal(result[0].evidence[0].source, source._id);
+});
+
+test('accepts the OpenAI-compatible Cloudflare choices response envelope', async () => {
+  const findings = [{ category: 'Decision', title: 'Ship the beta', description: 'The team chose a June beta launch.', confidence: 0.9, quote: 'The team decided to ship the beta in June.' }];
+  const result = await extractFindings(source, {
+    primaryProvider: 'cloudflare',
+    cloudflareAccountId: 'test-account',
+    cloudflareApiToken: 'test-token',
+    cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, result: { choices: [{ message: { content: JSON.stringify({ findings }) } }] } }),
+    }),
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].evidence[0].source, source._id);
+  assert.equal(result[0].evidence[0].verificationStatus, 'verified');
+});
+
+test('Cloudflare findings with unsupported evidence are rejected instead of accepted as unverified', async () => {
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => cloudflareResponse([{ category: 'Decision', title: 'Invented fact', description: 'Not in source.', quote: 'The team selected a launch date of August.' }]),
+  }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response' && /verified against the source/.test(error.message));
+});
+
+test('both providers failing returns a safe fallback error', async () => {
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareMaxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => { throw new Error('network failure including a private URL'); },
+  }), (error) => error instanceof GeminiAnalysisError && error.status === 503 && error.message === 'Neither AI provider could complete the analysis.');
+});
+
+test('fallback validation rejects incomplete or out-of-contract finding structures', async () => {
+  await assert.rejects(extractFindings(source, {
+    client: clientFrom([failure(503)]), maxRetries: 0,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => cloudflareResponse([{ category: 'Not a RELAY category', title: 'Invalid', description: 'Invalid', quote: 'The team decided to ship the beta in June.' }]),
+  }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response');
 });

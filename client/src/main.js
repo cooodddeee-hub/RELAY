@@ -1,9 +1,29 @@
-console.info('[RELAY INIT] main.js loaded');
+import { createClient } from '@supabase/supabase-js';
+
 const API_URL = (import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || window.RELAY_API_URL || '/api')).replace(/\/$/, '');
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || '').trim();
+const SUPABASE_PUBLISHABLE_KEY = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim();
+const SUPABASE_BUCKET = 'relay-files';
+let supabaseBrowser = null;
+function getSupabaseBrowserClient() {
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+    throw new Error('Uploads are unavailable because the Supabase browser URL or publishable key is not configured.');
+  }
+  if (!supabaseBrowser) {
+    try {
+      supabaseBrowser = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+    } catch {
+      throw new Error('Uploads are unavailable because the Supabase browser configuration is invalid.');
+    }
+  }
+  return supabaseBrowser;
+}
 const TOKEN_KEY = 'relayToken';
-const state = { mode: 'real', token: localStorage.getItem(TOKEN_KEY), user: null, projects: [], selectedProjectId: '', sources: [], findings: [], handovers: [], selectedHandoverId: '', handoverError: '', handoverActionError: '', handoverLoading: false, handoverBusy: false, handoverDownloading: false, errors: { projects: '', sources: '', findings: '' }, authMode: 'login', busy: false, reviewBusy: false, reviewFilter: 'all' };
+const state = { mode: 'real', token: localStorage.getItem(TOKEN_KEY), user: null, projects: [], selectedProjectId: '', sources: [], findings: [], handovers: [], selectedHandoverId: '', handoverError: '', handoverActionError: '', handoverLoading: false, handoverBusy: false, handoverDownloading: false, analysisJob: null, analysisJobError: '', analysisStarting: false, analysisAdvancing: false, errors: { projects: '', sources: '', findings: '' }, authMode: 'login', busy: false, reviewBusy: false, reviewFilter: 'all', sourceUploadBusy: false };
 let authGeneration = 0;
 let handoverRequest = 0;
+const analysisRunners = new Map();
+let analysisElapsedTimer = null;
 const categories = ['All', 'Decision', 'Completed Work', 'Pending Tasks', 'Responsibilities', 'Blockers', 'Dependencies', 'Risks', 'Next Actions', 'Unresolved Questions'];
 let activeCat = 'All';
 
@@ -125,6 +145,8 @@ function expireSession() {
   state.sources = [];
   state.findings = [];
   state.handovers = [];
+  state.analysisJob = null;
+  state.analysisJobError = '';
   state.errors = { projects: '', sources: '', findings: '' };
   localStorage.removeItem(TOKEN_KEY);
   byId('app').classList.add('hidden');
@@ -141,6 +163,8 @@ function enterDemo() {
   state.sources = structuredClone(DEMO_WORKSPACE.sources);
   state.findings = structuredClone(DEMO_WORKSPACE.findings);
   state.handovers = [];
+  state.analysisJob = null;
+  state.analysisJobError = '';
   state.errors = { projects: '', sources: '', findings: '' };
   if (state.authMode !== 'login') toggleAuthMode();
   showApp();
@@ -157,6 +181,8 @@ function exitDemo() {
   state.sources = [];
   state.findings = [];
   state.handovers = [];
+  state.analysisJob = null;
+  state.analysisJobError = '';
   state.errors = { projects: '', sources: '', findings: '' };
   byId('app').classList.add('hidden');
   byId('authOverlay').classList.remove('hidden');
@@ -169,7 +195,15 @@ function toggleAuthMode() {
   const registering = state.authMode === 'register';
   byId('registerNameField').classList.toggle('hidden', !registering);
   byId('authName').required = registering;
-  byId('authPass').autocomplete = registering ? 'new-password' : 'current-password';
+  const passwordInput = byId('authPass');
+  passwordInput.autocomplete = registering ? 'new-password' : 'current-password';
+  if (registering) {
+    passwordInput.minLength = 8;
+    passwordInput.maxLength = 128;
+  } else {
+    passwordInput.removeAttribute('minlength');
+    passwordInput.removeAttribute('maxlength');
+  }
   byId('loginBtn').firstChild.textContent = registering ? 'Create account ' : 'Sign in ';
   byId('authSwitchText').textContent = registering ? 'Already have an account?' : 'No account?';
   byId('authSwitch').textContent = registering ? 'Sign in' : 'Create account';
@@ -292,6 +326,9 @@ async function selectProject(projectId) {
   state.selectedHandoverId = '';
   state.handoverError = '';
   state.handoverActionError = '';
+  state.analysisJob = null;
+  state.analysisJobError = '';
+  renderAnalysisJob();
   const project = state.projects.find((item) => item._id === projectId);
   if (project) {
     byId('detailTitle').textContent = project.name;
@@ -310,12 +347,18 @@ async function loadProjectData() {
     state.findings = [];
     state.errors.sources = '';
     state.errors.findings = '';
+    state.analysisJob = null;
+    state.analysisJobError = '';
+    renderAnalysisJob();
     renderSources(); renderFindings(); renderReview();
     return;
   }
   if (state.mode === 'demo') {
     state.errors.sources = '';
     state.errors.findings = '';
+    state.analysisJob = null;
+    state.analysisJobError = '';
+    renderAnalysisJob();
     renderSources(); renderFindings(); renderReview(); renderProjects(); renderDashboard();
     return;
   }
@@ -334,6 +377,7 @@ async function loadProjectData() {
   refreshProjectControls();
   renderSources(); renderFindings(); renderReview(); renderProjects();
   renderDashboard();
+  await loadAnalysisJob({ resume: true });
 }
 
 function renderProjects() {
@@ -419,22 +463,106 @@ async function handleUpload(files) {
   if (state.mode === 'demo') { toast('DEMO DATA · uploads are disabled. Exit demo to upload a real file.', 'error'); return; }
   if (!canManageCurrentProject()) { toast('Only project owners and editors can upload sources.', 'error'); return; }
   if (!state.selectedProjectId) { toast('Select or create a project before uploading.', 'error'); return; }
+  if (state.sourceUploadBusy) { toast('A source upload is already in progress.', 'error'); return; }
+  let storageClient;
+  try { storageClient = getSupabaseBrowserClient(); }
+  catch (error) { setSourceUploadStatus(error.message, 'error'); toast(error.message, 'error'); return; }
   const projectId = encodeURIComponent(state.selectedProjectId);
-  for (const file of Array.from(files)) {
-    if (file.size > 15 * 1024 * 1024) { toast(`${file.name} is larger than the 15 MB server limit.`, 'error'); continue; }
-    toast(`Uploading ${file.name}…`);
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-      await api(`/projects/${projectId}/sources`, { method: 'POST', body: formData });
-      await loadProjectData();
-      toast(`${file.name} uploaded and processed`);
-    } catch (error) {
-      toast(`Upload failed for ${file.name}: ${error.message}`, 'error');
+  const batch = Array.from(files);
+  const fileInput = document.querySelector('#view-sources input[type="file"]');
+  state.sourceUploadBusy = true;
+  if (fileInput) fileInput.disabled = true;
+  try {
+    for (const [index, file] of batch.entries()) {
+      try {
+        const fileType = sourceUploadMimeType(file);
+        if (file.size < 1 || file.size > 15 * 1024 * 1024) throw new Error('Choose a file between 1 byte and 15 MiB.');
+        if (!fileType) throw new Error('Only PDF, DOCX, TXT and MD files are accepted.');
+        setSourceUploadStatus(`Preparing secure upload for ${file.name} (${index + 1} of ${batch.length})…`);
+        const intent = await api(`/projects/${projectId}/sources/upload-intent`, {
+          method: 'POST',
+          body: JSON.stringify({ originalName: file.name, mimeType: fileType, size: file.size }),
+        });
+        if (!intent?.source?._id || typeof intent.uploadUrl !== 'string') throw new Error('The server returned an incomplete upload authorization.');
+
+        const signedUpload = parseSignedUploadUrl(intent.uploadUrl);
+        setSourceUploadStatus(`Uploading ${file.name} directly to private storage (${index + 1} of ${batch.length})…`);
+        const uploaded = await storageClient.storage.from(signedUpload.bucket).uploadToSignedUrl(
+          signedUpload.path,
+          signedUpload.token,
+          file,
+          { contentType: fileType, upsert: false },
+        );
+        if (uploaded.error) throw new Error('Private storage could not accept this file. Check the bucket CORS and upload settings.');
+
+        setSourceUploadStatus(`Verifying and extracting ${file.name} (${index + 1} of ${batch.length})…`);
+        await api(`/sources/${encodeURIComponent(intent.source._id)}/complete`, { method: 'POST' });
+
+        if (state.mode === 'real' && state.selectedProjectId === decodeURIComponent(projectId)) {
+          setSourceUploadStatus(`Refreshing sources after ${file.name}…`);
+          try {
+            const refreshed = await api(`/projects/${projectId}/sources`);
+            state.sources = refreshed.sources || [];
+            state.errors.sources = '';
+            renderSources();
+          } catch (refreshError) {
+            state.errors.sources = refreshError.message;
+            renderSources();
+            setSourceUploadStatus(`${file.name} was processed, but the source list could not be refreshed: ${refreshError.message}`, 'error');
+            toast('Source processed, but the list could not be refreshed.', 'error');
+            continue;
+          }
+        }
+        setSourceUploadStatus(`${file.name} uploaded and processed.`, 'success');
+        toast(`${file.name} uploaded and processed`);
+      } catch (error) {
+        setSourceUploadStatus(`Upload failed for ${file.name}: ${error.message}`, 'error');
+        toast(`Upload failed for ${file.name}: ${error.message}`, 'error');
+      }
+    }
+  } finally {
+    state.sourceUploadBusy = false;
+    if (fileInput) {
+      fileInput.value = '';
+      fileInput.disabled = !canManageCurrentProject();
     }
   }
-  const fileInput = document.querySelector('#view-sources input[type="file"]');
-  if (fileInput) fileInput.value = '';
+}
+
+function sourceUploadMimeType(file) {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  const allowed = {
+    pdf: ['application/pdf', 'application/x-pdf', 'application/octet-stream'],
+    docx: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/octet-stream'],
+    txt: ['text/plain', 'application/octet-stream'],
+    md: ['text/markdown', 'text/x-markdown', 'text/plain', 'application/octet-stream'],
+  }[extension];
+  if (!allowed) return '';
+  return allowed.includes(file.type) ? file.type : (!file.type ? allowed[0] : '');
+}
+
+function parseSignedUploadUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { throw new Error('The server returned an invalid upload authorization.'); }
+  let expectedOrigin;
+  try { expectedOrigin = new URL(SUPABASE_URL).origin; } catch { throw new Error('Supabase browser configuration is invalid.'); }
+  const marker = '/object/upload/sign/';
+  const markerIndex = url.pathname.indexOf(marker);
+  if (url.origin !== expectedOrigin || markerIndex < 0) throw new Error('The server upload authorization does not match the configured Supabase project.');
+  const bucketAndKey = url.pathname.slice(markerIndex + marker.length);
+  const separator = bucketAndKey.indexOf('/');
+  const bucket = separator < 0 ? '' : decodeURIComponent(bucketAndKey.slice(0, separator));
+  const path = separator < 0 ? '' : decodeURIComponent(bucketAndKey.slice(separator + 1));
+  const token = url.searchParams.get('token');
+  if (bucket !== SUPABASE_BUCKET || !path || !token) throw new Error('The server upload authorization is incomplete.');
+  return { bucket, path, token };
+}
+
+function setSourceUploadStatus(message, kind = 'info') {
+  const status = byId('sourceUploadStatus');
+  if (!status) return;
+  status.textContent = message;
+  status.className = `text-xs mt-1 ${kind === 'error' ? 'text-red-300' : kind === 'success' ? 'text-emerald-300' : 'text-white/45'}`;
 }
 
 function findingStatus(status) { return statusLabel(status); }
@@ -544,7 +672,7 @@ function canManageCurrentProject() {
 function refreshProjectControls() {
   const allowed = state.mode === 'demo' || canManageCurrentProject();
   const input = document.querySelector('#view-sources input[type="file"]');
-  if (input) input.disabled = !allowed;
+  if (input) input.disabled = !allowed || state.sourceUploadBusy;
   const uploadLabel = byId('sourceUploadLabel');
   if (uploadLabel) {
     uploadLabel.classList.toggle('opacity-40', !allowed);
@@ -562,6 +690,7 @@ function refreshProjectControls() {
   }
   const note = byId('sourcePermissionNote');
   if (note) note.textContent = state.mode === 'demo' ? 'DEMO DATA · Uploads and analysis are not connected in the sample workspace.' : allowed ? 'Owners and editors can upload sources and run analysis.' : 'Read-only access · Ask the project owner to grant Editor access to upload or run analysis.';
+  renderAnalysisJob();
 }
 
 async function submitReviewAction(findingId, action, payload = {}) {
@@ -665,31 +794,252 @@ function updateDemoFinding(id, status) {
   toast(`DEMO DATA · marked ${statusLabel(status).toLowerCase()} in this session only.`);
 }
 
+function formatElapsed(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}:${String(totalSeconds % 60).padStart(2, '0')}`;
+}
+
+function renderAnalysisJob() {
+  const panel = byId('analysisJobStatus');
+  if (!panel) return;
+  clear(panel);
+  panel.classList.add('hidden');
+  const active = state.analysisJob;
+  const statusLabels = {
+    queued: 'Queued', running: 'Analyzing a source', retry_wait: 'Waiting to retry a temporary provider failure',
+    completed: 'Analysis complete', failed: 'Analysis needs attention',
+  };
+  const busy = state.analysisStarting || state.analysisAdvancing || ['queued', 'running', 'retry_wait'].includes(active?.status);
+  for (const id of ['analyzeTopButton', 'analyzeFindingsButton']) {
+    const button = byId(id);
+    if (!button) continue;
+    const allowed = state.mode === 'demo' || canManageCurrentProject();
+    button.disabled = !allowed || busy;
+    const label = button.querySelector('span');
+    if (label) label.textContent = active?.status === 'failed' ? 'Retry Analysis' : busy ? 'Analysis In Progress' : 'Analyze New Sources';
+  }
+  if (state.mode === 'demo') {
+    if (analysisElapsedTimer) { window.clearInterval(analysisElapsedTimer); analysisElapsedTimer = null; }
+    panel.classList.remove('hidden');
+    panel.append(node('p', 'DEMO DATA · Sample findings are not generated by AI. Demo analysis actions do not call the API.', 'text-sm text-violet-200/80'));
+    return;
+  }
+  if (state.analysisStarting && !active) {
+    panel.classList.remove('hidden');
+    panel.className = 'rounded-3xl border border-violet-300/20 bg-gradient-to-br from-violet-500/10 via-[#101831] to-sky-500/5 p-5 sm:p-7 shadow-2xl shadow-violet-950/20';
+    const hero = node('div', undefined, 'flex items-start gap-4');
+    const icon = node('div', undefined, 'grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-violet-300/20 bg-violet-400/10');
+    icon.append(node('span', undefined, 'h-5 w-5 animate-spin rounded-full border-2 border-violet-200/25 border-t-violet-200'));
+    hero.append(icon);
+    const copy = node('div', undefined, 'min-w-0 flex-1');
+    copy.append(node('p', 'Preparing your analysis', 'text-lg font-semibold tracking-tight text-white'));
+    copy.append(node('p', 'RELAY is saving the job before processing begins. AI analysis and evidence verification can take several minutes.', 'mt-1 max-w-2xl text-sm leading-6 text-white/60'));
+    hero.append(copy); panel.append(hero);
+    panel.append(node('p', 'Keep this authenticated workspace open. Closing the page pauses browser-driven processing; returning to the project resumes the saved job.', 'mt-5 border-t border-white/10 pt-4 text-xs leading-5 text-white/45'));
+    return;
+  }
+  if (state.analysisJobError) {
+    panel.classList.remove('hidden');
+    panel.className = 'rounded-3xl border border-rose-300/20 bg-rose-500/[0.06] p-5 sm:p-7';
+    panel.append(node('p', `Could not load analysis status: ${state.analysisJobError}`, 'text-sm text-rose-200'));
+    return;
+  }
+  if (!active) { if (analysisElapsedTimer) { window.clearInterval(analysisElapsedTimer); analysisElapsedTimer = null; } return; }
+  panel.classList.remove('hidden');
+  panel.className = `relative overflow-hidden rounded-3xl border p-5 sm:p-7 transition-colors ${active.status === 'failed' ? 'border-rose-300/20 bg-rose-500/[0.06]' : active.status === 'completed' ? 'border-emerald-300/20 bg-emerald-500/[0.06]' : 'border-violet-300/20 bg-gradient-to-br from-violet-500/10 via-[#101831] to-sky-500/5 shadow-2xl shadow-violet-950/20'}`;
+  const total = active.sourceIds?.length || 0;
+  const completed = Math.min(total, active.completedSourceCount || 0);
+  const source = state.sources.find((item) => String(item._id) === String(active.currentSource));
+  const elapsed = active.startedAt ? Date.now() - new Date(active.startedAt).getTime() : active.elapsedMs || 0;
+  const hero = node('div', undefined, 'flex items-start gap-4');
+  const icon = node('div', undefined, `grid h-12 w-12 shrink-0 place-items-center rounded-2xl border ${active.status === 'completed' ? 'border-emerald-300/20 bg-emerald-400/10' : active.status === 'failed' ? 'border-rose-300/20 bg-rose-400/10' : 'border-violet-300/20 bg-violet-400/10'}`);
+  if (['queued', 'running', 'retry_wait'].includes(active.status)) icon.append(node('span', undefined, 'h-5 w-5 animate-spin rounded-full border-2 border-violet-200/25 border-t-violet-200'));
+  else icon.textContent = active.status === 'completed' ? '✓' : '!';
+  icon.setAttribute('aria-hidden', 'true'); hero.append(icon);
+  const copy = node('div', undefined, 'min-w-0 flex-1');
+  const heading = node('div', undefined, 'flex flex-wrap items-center gap-2');
+  heading.append(node('h2', statusLabels[active.status] || 'Analysis status', 'text-lg font-semibold tracking-tight text-white'));
+  if (['queued', 'running', 'retry_wait'].includes(active.status)) heading.append(node('span', 'LIVE JOB', 'rounded-full border border-violet-300/20 bg-violet-400/10 px-2 py-1 text-[10px] font-semibold tracking-widest text-violet-200'));
+  copy.append(heading);
+  const stageLabels = { queued: 'Waiting to begin', analyzing_source: 'Analyzing source and checking evidence', saving_findings: 'Saving validated findings', retry_wait: 'Waiting for a safe retry', completed: 'All saved sources processed', failed: 'The current source was not committed' };
+  copy.append(node('p', stageLabels[active.stage] || 'Analysis status saved', 'mt-1 text-sm leading-6 text-white/60'));
+  hero.append(copy); panel.append(hero);
+  const sourceDetails = active.currentSource && ['running', 'retry_wait'].includes(active.status)
+    ? `Source ${Math.min(total, completed + 1)} of ${total}${source?.originalName ? ` · ${source.originalName}` : ''}`
+    : `${completed} of ${total} sources complete`;
+  const metrics = node('div', undefined, 'mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-white/[0.07] bg-black/10 px-4 py-3');
+  metrics.append(node('span', sourceDetails, 'text-sm font-medium text-white/85'));
+  metrics.append(node('span', `Stage · ${active.stage || active.status}`, 'text-xs text-white/45'));
+  if (active.startedAt) {
+    const elapsedLabel = node('span', `Elapsed ${formatElapsed(elapsed)}`, 'text-sm font-mono tabular-nums text-violet-200');
+    elapsedLabel.id = 'analysisElapsedTime'; metrics.append(elapsedLabel);
+  }
+  panel.append(metrics);
+  if (['queued', 'running', 'retry_wait'].includes(active.status) && active.startedAt && !analysisElapsedTimer) {
+    analysisElapsedTimer = window.setInterval(() => {
+      const current = state.analysisJob;
+      const label = byId('analysisElapsedTime');
+      if (!current || !['queued', 'running', 'retry_wait'].includes(current.status) || !current.startedAt || !label) return;
+      label.textContent = `Elapsed ${formatElapsed(Date.now() - new Date(current.startedAt).getTime())} · Analysis may take several minutes.`;
+    }, 1000);
+  } else if ((!['queued', 'running', 'retry_wait'].includes(active.status) || !active.startedAt) && analysisElapsedTimer) {
+    window.clearInterval(analysisElapsedTimer); analysisElapsedTimer = null;
+  }
+  const track = node('div', undefined, 'mt-3 h-1.5 rounded-full bg-white/10 overflow-hidden');
+  const fill = node('div', undefined, 'h-full rounded-full bg-violet-400 transition-all');
+  fill.style.width = `${total ? Math.round((completed / total) * 100) : 0}%`;
+  track.setAttribute('role', 'progressbar'); track.setAttribute('aria-label', 'Completed sources'); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', String(total)); track.setAttribute('aria-valuenow', String(completed));
+  track.append(fill); panel.append(track);
+  panel.append(node('p', 'AI analysis and exact evidence verification can take several minutes. This display reflects saved server progress; it does not estimate time remaining.', 'mt-3 text-xs leading-5 text-white/45'));
+  if (active.status === 'retry_wait' && active.retryAt) {
+    const seconds = Math.max(0, Math.ceil((new Date(active.retryAt).getTime() - Date.now()) / 1000));
+    panel.append(node('p', `Retrying after the saved backoff${seconds ? ` · about ${seconds}s` : ''}.`, 'mt-2 text-xs text-amber-200'));
+  }
+  if (active.status === 'failed') {
+    panel.append(node('p', active.retryable ? 'The current source was not committed. You can retry this source safely; completed sources and findings remain saved.' : 'The current source was not committed. Check the provider or source, then retry when ready.', 'mt-3 text-sm leading-5 text-rose-200'));
+    if (canManageCurrentProject()) {
+      const retry = node('button', 'Retry failed source', 'mt-3 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50');
+      retry.type = 'button'; retry.disabled = state.analysisAdvancing || state.analysisStarting;
+      retry.addEventListener('click', retryCurrentAnalysisJob); panel.append(retry);
+    }
+  }
+  panel.append(node('p', 'This authenticated page advances the saved job one source at a time. An in-flight source may finish after you leave, then advancement pauses. Reopen the project to resume.', 'mt-4 border-t border-white/10 pt-4 text-xs leading-5 text-white/45'));
+}
+
+async function advanceSourceWithPolling(jobId, projectId) {
+  // Keep the long-running advance request open while reading persisted progress
+  // separately. Status polling never starts work and cannot duplicate a step.
+  const advance = api(`/analysis-jobs/${encodeURIComponent(jobId)}/advance`, { method: 'POST', body: '{}' })
+    .then((data) => ({ data }), (error) => ({ error }));
+  while (true) {
+    let timerId;
+    const pollInterval = new Promise((resolve) => { timerId = window.setTimeout(() => resolve(null), 1500); });
+    const outcome = await Promise.race([advance, pollInterval]);
+    window.clearTimeout(timerId);
+    if (outcome) {
+      if (outcome.error) throw outcome.error;
+      return outcome.data;
+    }
+    if (state.mode !== 'real' || String(state.selectedProjectId) !== projectId) return null;
+    const current = (await api(`/analysis-jobs/${encodeURIComponent(jobId)}`)).job;
+    if (String(state.selectedProjectId) !== projectId || String(current?.project) !== projectId) return null;
+    state.analysisJob = current;
+    renderAnalysisJob();
+  }
+}
+
+async function loadAnalysisJob({ resume = false } = {}) {
+  if (state.mode !== 'real' || !state.selectedProjectId) { renderAnalysisJob(); return null; }
+  const projectId = state.selectedProjectId;
+  try {
+    const data = await api(`/projects/${encodeURIComponent(projectId)}/analysis-job`);
+    if (projectId !== state.selectedProjectId || state.mode !== 'real') return null;
+    state.analysisJob = data.job || null;
+    state.analysisJobError = '';
+    renderAnalysisJob();
+    if (resume && state.analysisJob && ['queued', 'running', 'retry_wait'].includes(state.analysisJob.status) && canManageCurrentProject()) {
+      runAnalysisJob(state.analysisJob._id);
+    }
+    return state.analysisJob;
+  } catch (error) {
+    if (projectId === state.selectedProjectId) { state.analysisJobError = error.message; renderAnalysisJob(); }
+    return null;
+  }
+}
+
+function runAnalysisJob(jobId) {
+  if (analysisRunners.has(jobId)) return analysisRunners.get(jobId);
+  const runProjectId = String(state.analysisJob?.project || '');
+  const promise = (async () => {
+    state.analysisAdvancing = true; renderAnalysisJob();
+    try {
+      while (state.mode === 'real' && state.selectedProjectId && String(state.selectedProjectId) === runProjectId) {
+        const job = state.analysisJob?._id === jobId ? state.analysisJob : await (await api(`/analysis-jobs/${encodeURIComponent(jobId)}`)).job;
+        if (String(job?.project) !== runProjectId || String(state.selectedProjectId) !== runProjectId) break;
+        if (!job || ['completed', 'failed'].includes(job.status)) { state.analysisJob = job; break; }
+        if (state.analysisJob?._id !== jobId) state.analysisJob = job;
+        renderAnalysisJob();
+        if (job.status === 'retry_wait' && job.retryAt && new Date(job.retryAt).getTime() > Date.now()) {
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(2000, new Date(job.retryAt).getTime() - Date.now())));
+          const current = (await api(`/analysis-jobs/${encodeURIComponent(jobId)}`)).job;
+          if (String(state.selectedProjectId) !== runProjectId) break;
+          state.analysisJob = current;
+          continue;
+        }
+        if (job.leaseActive) {
+          await new Promise((resolve) => window.setTimeout(resolve, 2000));
+          const current = (await api(`/analysis-jobs/${encodeURIComponent(jobId)}`)).job;
+          if (String(state.selectedProjectId) !== runProjectId) break;
+          state.analysisJob = current;
+          continue;
+        }
+        try {
+          const result = await advanceSourceWithPolling(jobId, runProjectId);
+          if (!result) break;
+          if (String(state.selectedProjectId) === runProjectId) {
+            state.analysisJob = result.job;
+            state.analysisJobError = '';
+            renderAnalysisJob();
+          }
+        } catch (error) {
+          if (error.status !== 409) throw error;
+          const current = (await api(`/analysis-jobs/${encodeURIComponent(jobId)}`)).job;
+          if (String(state.selectedProjectId) === runProjectId) { state.analysisJob = current; renderAnalysisJob(); }
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        }
+        if (String(state.selectedProjectId) === runProjectId && state.analysisJob?.status === 'failed') break;
+      }
+      if (String(state.selectedProjectId) === runProjectId && state.analysisJob?._id === jobId && state.analysisJob.status === 'completed') {
+        toast(`Analysis complete · ${state.analysisJob.completedSourceCount} source(s) processed.`);
+        await loadProjectData();
+      }
+    } catch (error) {
+      if (String(state.selectedProjectId) === runProjectId) { state.analysisJobError = error.message; renderAnalysisJob(); }
+    } finally {
+      analysisRunners.delete(jobId);
+      state.analysisAdvancing = analysisRunners.size > 0;
+      renderAnalysisJob();
+    }
+  })();
+  analysisRunners.set(jobId, promise);
+  return promise;
+}
+
+async function retryCurrentAnalysisJob() {
+  const jobId = state.analysisJob?._id;
+  const projectId = state.selectedProjectId;
+  if (!jobId || state.analysisStarting || state.analysisAdvancing || !canManageCurrentProject()) return;
+  state.analysisStarting = true; renderAnalysisJob();
+  try {
+    const result = await api(`/analysis-jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST', body: '{}' });
+    if (state.selectedProjectId !== projectId) return;
+    state.analysisJob = result.job; state.analysisJobError = '';
+    renderAnalysisJob(); await runAnalysisJob(jobId);
+  } catch (error) { if (state.selectedProjectId === projectId) { state.analysisJobError = error.message; renderAnalysisJob(); } }
+  finally { state.analysisStarting = false; renderAnalysisJob(); }
+}
+
 async function simulateAnalyze() {
   if (state.mode === 'demo') { toast('DEMO DATA · sample findings are shown; no Gemini request was made.'); return; }
   if (!canManageCurrentProject()) { toast('Only project owners and editors can run project analysis.', 'error'); return; }
   if (!state.selectedProjectId) { toast('Select or create a project before analysis.', 'error'); return; }
+  if (state.analysisStarting || state.analysisAdvancing) return;
+  if (state.analysisJob?.status === 'failed') { await retryCurrentAnalysisJob(); return; }
+  if (state.analysisJob && ['queued', 'running', 'retry_wait'].includes(state.analysisJob.status)) { runAnalysisJob(state.analysisJob._id); return; }
   if (!state.sources.some((source) => source.status === 'processed')) { toast('Upload at least one processed document before analysis.', 'error'); return; }
-  const projectId = encodeURIComponent(state.selectedProjectId);
-  toast('Analyzing project sources with Gemini…');
+  const projectId = state.selectedProjectId;
+  state.analysisStarting = true; state.analysisJobError = '';
+  navigate('findings'); renderAnalysisJob();
   try {
-    const data = await api(`/projects/${projectId}/analyze`, { method: 'POST', body: JSON.stringify({}) });
-    await loadProjectData();
-    toast(`Analysis complete: ${data.findings?.length || 0} finding(s) created`);
-  } catch (error) {
-    const message = error.status === 429
-      ? 'Gemini rate limit reached. Wait briefly and retry. Uploaded sources are still saved.'
-      : error.status === 503
-        ? 'Gemini is temporarily unavailable. Retry shortly. Uploaded sources are still saved.'
-        : error.status === 504
-          ? 'Gemini analysis timed out. Retry shortly. Uploaded sources are still saved.'
-          : error.status === 409
-            ? error.message
-            : error.status === 502
-              ? 'Gemini returned an unusable response. No fake findings were added; check the server logs and retry.'
-              : `Analysis failed: ${error.message}`;
-    toast(message, 'error');
-  }
+    const data = await api(`/projects/${encodeURIComponent(projectId)}/analyze`, { method: 'POST', body: '{}' });
+    if (state.selectedProjectId !== projectId) return;
+    state.analysisJob = data.job || null;
+    renderAnalysisJob();
+    if (state.analysisJob) await runAnalysisJob(state.analysisJob._id);
+    else { toast(data.message || 'All processed sources have already been analyzed.'); await loadProjectData(); }
+  } catch (error) { state.analysisJobError = error.message; renderAnalysisJob(); toast(`Could not start analysis: ${error.message}`, 'error'); }
+  finally { state.analysisStarting = false; renderAnalysisJob(); }
 }
 
 function renderCategoryFilters() {
@@ -994,13 +1344,6 @@ async function generateReport() {
   finally { state.handoverBusy = false; renderHandover(); }
 }
 async function downloadPDF() {
-  // Temporary diagnostics: never include credentials or response contents here.
-  console.debug('[RELAY PDF] Download handler entered', {
-    mode: state.mode,
-    selectedHandoverId: state.selectedHandoverId || null,
-    selectedVersion: state.handovers.find((item) => item._id === state.selectedHandoverId)?.version || null,
-    alreadyDownloading: state.handoverDownloading
-  });
   const status = byId('handoverStatus');
   if (state.mode === 'demo') { if (status) status.textContent = 'DEMO DATA · PDF downloads are unavailable for sample content.'; return; }
   if (!state.selectedHandoverId) { if (status) status.textContent = 'Select a saved handover version before downloading.'; toast('Select a saved handover version first.', 'error'); return; }
@@ -1015,7 +1358,6 @@ async function downloadPDF() {
     const headers = new Headers();
     if (state.token) headers.set('Authorization', `Bearer ${state.token}`);
     const downloadUrl = `${API_URL}/handovers/${encodeURIComponent(handoverId)}/download`;
-    console.debug('[RELAY PDF] Sending download request', { url: downloadUrl, version: selected?.version || null });
     const response = await fetch(downloadUrl, { headers });
     if (!response.ok) {
       const data = response.headers.get('content-type')?.includes('application/json') ? await response.json().catch(() => ({})) : {};
@@ -1170,15 +1512,10 @@ function searchFindings(value) {
 }
 
 function bindEvents() {
-  console.info('[RELAY INIT] bindEvents started');
   const downloadButton = byId('downloadHandoverButton');
-  if (downloadButton) {
-    downloadButton.addEventListener('click', () => console.info('[RELAY INIT] download button click received'));
-    downloadButton.addEventListener('click', downloadPDF);
-    console.info('[RELAY INIT] download listener registered');
-  } else {
-    console.error('[RELAY INIT] download button not found during event binding');
-  }
+  downloadButton?.addEventListener('click', downloadPDF);
+  const authForm = byId('authForm');
+  authForm?.addEventListener('submit', login);
   byId('dropzone')?.addEventListener('dragover', (event) => { event.preventDefault(); byId('dropzone').classList.add('border-violet-500'); });
   byId('dropzone')?.addEventListener('dragleave', () => byId('dropzone').classList.remove('border-violet-500'));
   byId('dropzone')?.addEventListener('drop', (event) => { event.preventDefault(); byId('dropzone').classList.remove('border-violet-500'); handleUpload(event.dataTransfer.files); });
@@ -1219,6 +1556,6 @@ bindEvents();
 try {
   if (window.lucide) window.lucide.createIcons();
 } catch (error) {
-  console.error('[RELAY INIT] Lucide icon initialization failed', error);
+  console.error('Lucide icon initialization failed', error);
 }
 restoreSession();

@@ -30,6 +30,10 @@ Set local values for the variable names below in `server/.env`. Do not commit th
 | `JWT_SECRET` | Secret used to sign authentication tokens. |
 | `GEMINI_API_KEY` | Gemini API key, used only by the backend. |
 | `GEMINI_MODEL` | Optional Gemini model identifier. Check provider availability for the account before configuring a specific model. |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID for the server-side Workers AI fallback. |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with Workers AI permission. Keep it server-side. |
+
+Gemini is the primary analysis provider. After the configured Gemini retries, RELAY tries the Cloudflare model `@cf/meta/llama-3.1-8b-instruct` only for HTTP 408, 429, 500, 502, 503, or 504 failures, recognized network failures, and timeouts. Gemini authentication/permission errors, invalid input, and malformed Gemini output do not trigger fallback. Cloudflare is called once; its finding structure and every evidence quotation must pass validation against the original extracted source text. The model may return fewer findings or unusable output, which results in a sanitized analysis error. Model availability, output quality, latency, and quota are not guaranteed.
 
 The client also provides `client/.env.example` with `VITE_API_URL=/api`. The Vite development server proxies `/api` to `http://127.0.0.1:5000`, so the default works for local development without a separate API URL.
 
@@ -93,7 +97,7 @@ The detailed API endpoint reference is intentionally deferred to a separate docu
 - **Authentication fails:** confirm the server has `JWT_SECRET` configured and sign in again if the token has expired.
 - **CORS blocks the browser:** make `CLIENT_URL` match the frontend origin, including scheme and port.
 - **Upload is rejected:** check that the file is PDF, DOCX, TXT, or MD and no larger than 15 MB.
-- **Gemini analysis fails:** check server-side API credentials, quota, provider availability, and whether the configured model identifier is available to the account. Retryable provider errors are surfaced as analysis errors; uploaded sources remain saved.
+- **AI analysis fails:** check the server-side Gemini credentials/model and Cloudflare account ID/token permissions, provider availability, and quota. Cloudflare is only a fallback for temporary Gemini failures; uploaded sources remain saved if both providers fail.
 - **Frontend cannot reach the API:** confirm the backend is running on port `5000`, the Vite `/api` proxy is active, or the production API base/proxy is configured correctly.
 
 Uploaded files are stored on local disk. Use durable private storage and define access, backup, and retention policies for deployments where local files may be ephemeral.
