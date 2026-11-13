@@ -119,7 +119,7 @@ async function completeEmptyJob(job) {
   });
 }
 
-async function commitSourceStep({ jobId, token, sourceId, findings }) {
+async function commitSourceStep({ jobId, token, sourceId, findings, providerAttempts }) {
   return withTransaction(async (session) => {
     const job = await AnalysisJob.findOne({ _id: jobId, leaseToken: token }).select('+leaseToken').session(session);
     if (!job) throw new AnalysisJobError('Analysis step lease expired before its checkpoint.', 409);
@@ -161,9 +161,10 @@ async function commitSourceStep({ jobId, token, sourceId, findings }) {
           stage: checkpoint.stage,
           retryable: false,
           lastProgressAt: new Date(),
+          lastProviderAttempts: safeProviderAttempts(providerAttempts),
           ...(completedAt ? { completedAt } : {}),
         },
-        $unset: { retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, lastProviderAttempts: 1, leaseToken: 1, leaseExpiresAt: 1 },
+        $unset: { retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, leaseToken: 1, leaseExpiresAt: 1 },
       },
       { session },
     );
@@ -182,7 +183,7 @@ function isTemporaryAnalysisFailure(error) {
   return error.retryable === true || [408, 429, 500, 502, 503, 504].includes(error.providerStatus);
 }
 
-async function recordStepFailure(job, token, error, now = new Date()) {
+async function recordStepFailure(job, token, error, now = new Date(), providerAttempts = error?.providerAttempts) {
   const retryable = isTemporaryAnalysisFailure(error) || error?.code === 'ANALYSIS_STEP_BUDGET';
   const disposition = analysisFailureDisposition({ retryable, attemptCount: job.attemptCount, maxAttempts: MAX_JOB_ATTEMPTS_PER_SOURCE });
   const shouldRetry = disposition.status === 'retry_wait';
@@ -195,7 +196,7 @@ async function recordStepFailure(job, token, error, now = new Date()) {
       ...(shouldRetry ? { retryAt: new Date(now.getTime() + backoffMs) } : {}),
       lastErrorKind: analysisFailureCode(error),
       ...(Number.isInteger(error?.status) ? { lastErrorStatus: error.status } : {}),
-      lastProviderAttempts: safeProviderAttempts(error?.providerAttempts),
+      lastProviderAttempts: safeProviderAttempts(providerAttempts),
       currentSource: job.sourceIds[job.nextSourceIndex],
       lastProgressAt: now,
     },
@@ -215,20 +216,22 @@ export async function advanceAnalysisJob(jobId, { now = () => new Date(), analyz
     return claim.job;
   }
   const { job, token, sourceId } = claim;
+  let providerAttempts = [];
   try {
     const source = await Source.findOne({ _id: sourceId, project: job.project, status: 'processed' });
     if (!source) throw new AnalysisJobError('The source for this analysis step is unavailable.', 404);
     const findings = await analyze(source);
+    providerAttempts = findings?.providerAttempts || [];
     if (Date.now() - startedAt >= ANALYSIS_STEP_BUDGET_MS) {
       const budgetError = new Error('Analysis step exceeded its safe processing budget.');
       budgetError.code = 'ANALYSIS_STEP_BUDGET';
-      return recordStepFailure(job, token, budgetError, now());
+      return recordStepFailure(job, token, budgetError, now(), providerAttempts);
     }
     await AnalysisJob.updateOne({ _id: job._id, leaseToken: token }, { $set: { stage: 'saving_findings', lastProgressAt: now() } });
-    return await commitSourceStep({ jobId, token, sourceId, findings });
+    return await commitSourceStep({ jobId, token, sourceId, findings, providerAttempts: findings?.providerAttempts });
   } catch (error) {
     if (error instanceof AnalysisJobError && error.status === 409) throw error;
-    return recordStepFailure(job, token, error, now());
+    return recordStepFailure(job, token, error, now(), providerAttempts.length ? providerAttempts : error?.providerAttempts);
   }
 }
 

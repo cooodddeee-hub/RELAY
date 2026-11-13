@@ -1,5 +1,4 @@
 import { GoogleGenAI } from '@google/genai';
-import { sanitizeLogText } from '../utils/safeLogger.js';
 import { verifyEvidenceQuote } from './evidenceVerification.js';
 const allowed = ['Decision', 'Completed Work', 'Pending Tasks', 'Responsibilities', 'Blockers', 'Dependencies', 'Risks', 'Next Actions', 'Unresolved Questions'];
 export const GEMINI_TIMEOUT_MS = 30_000;
@@ -20,13 +19,53 @@ export class GeminiAnalysisError extends Error {
   }
 }
 
+function errorChain(error) {
+  const pending = [error];
+  const seen = new Set();
+  const chain = [];
+  while (pending.length && chain.length < 12) {
+    const current = pending.shift();
+    if (!current || (typeof current !== 'object' && typeof current !== 'function') || seen.has(current)) continue;
+    seen.add(current);
+    chain.push(current);
+    for (const key of ['cause', 'error', 'originalError', 'response']) {
+      try { if (current[key] && typeof current[key] === 'object') pending.push(current[key]); } catch {}
+    }
+  }
+  return chain;
+}
+
 function providerStatus(error) {
-  const status = Number(error.status || error.statusCode || (error.response && error.response.status));
-  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+  for (const current of errorChain(error)) {
+    for (const field of ['providerStatus', 'status', 'statusCode', 'status_code']) {
+      if (current instanceof GeminiAnalysisError && field === 'status' && current.providerStatus === undefined) continue;
+      const status = Number(current[field]);
+      if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+    }
+  }
+  return undefined;
+}
+
+const timeoutCodes = new Set(['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ERR_SOCKET_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+const networkCodes = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EAI_AGAIN', 'ENETUNREACH', 'ENETDOWN', 'ENOTFOUND', 'EHOSTUNREACH', 'EHOSTDOWN', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT']);
+
+function isUserCancellation(error) {
+  return errorChain(error).some((current) => current.name === 'APIUserAbortError'
+    || current.name === 'AbortError'
+    || current.code === 'ABORT_ERR');
 }
 
 function isTimeout(error) {
-  return /timeout|timed.?out|abort/i.test((error.name || '') + ' ' + (error.code || '') + ' ' + (error.message || ''));
+  if (isUserCancellation(error)) return false;
+  return errorChain(error).some((current) => timeoutCodes.has(current.code)
+    || current.name === 'APIConnectionTimeoutError'
+    || current.name === 'TimeoutError'
+    || /^(?:request|connection|connect|socket|operation) (?:has )?timed out[.!]?$/i.test(current.message || ''));
+}
+
+function isNetworkFailure(error) {
+  if (isUserCancellation(error)) return false;
+  return errorChain(error).some((current) => current.name === 'APIConnectionError' || networkCodes.has(current.code));
 }
 
 function isTemporaryHttpStatus(status) {
@@ -34,15 +73,16 @@ function isTemporaryHttpStatus(status) {
 }
 
 function isRetryable(error) {
+  if (isUserCancellation(error)) return false;
   const status = providerStatus(error);
-  if (isTimeout(error)) return true;
+  if (status === 401 || status === 403) return false;
   if (status !== undefined) return isTemporaryHttpStatus(status);
-  return /APIConnectionError|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|fetch failed|network/i.test((error.name || '') + ' ' + (error.code || '') + ' ' + (error.message || ''));
+  return isTimeout(error) || isNetworkFailure(error);
 }
 
 function publicProviderStatus(error) {
   const status = providerStatus(error);
-  if (isTimeout(error)) return 504;
+  if (isTimeout(error) || status === 408) return 504;
   if (status === 429) return 429;
   if (status !== undefined && status >= 500) return 503;
   return 502;
@@ -52,18 +92,45 @@ function providerDiagnostic(provider, phase, fields = {}) {
   console.info(JSON.stringify({ level: 'info', operation: 'analysis.providerRequest', provider, phase, ...fields }));
 }
 
-async function measuredRequest(provider, request, fallbackOccurred) {
+function attemptMetadata(provider, error) {
+  const status = providerStatus(error);
+  let category = 'unknown';
+  let errorCode = 'unknown';
+  if (error?.kind === 'configuration') { category = 'configuration'; errorCode = 'configuration_error'; }
+  else if (error?.kind === 'invalid_response') { category = 'invalid_output'; errorCode = 'invalid_output'; }
+  else if (status !== undefined) { category = 'http'; errorCode = 'http_error'; }
+  else if (isTimeout(error)) { category = 'timeout'; errorCode = 'timeout'; }
+  else if (isNetworkFailure(error)) {
+    category = 'network'; errorCode = 'network_error';
+  }
+  const outcome = error?.kind === 'configuration' ? 'configuration_failure'
+    : error?.kind === 'invalid_response' ? 'invalid_output'
+      : isRetryable(error) ? 'temporary_failure' : 'permanent_failure';
+  return { provider, outcome, category, errorCode, ...(status === undefined ? {} : { status }) };
+}
+
+function recordProviderAttempt(options, attempt) {
+  options.providerAttempts.push(attempt);
+}
+
+async function measuredRequest(provider, request, fallbackOccurred, options) {
   const startedAt = Date.now();
   providerDiagnostic(provider, 'started', { fallbackOccurred });
   try {
     const result = await request();
+    recordProviderAttempt(options, { provider, outcome: 'success', category: 'success', errorCode: 'none' });
     providerDiagnostic(provider, 'completed', { durationMs: Date.now() - startedAt, success: true, fallbackOccurred });
     return result;
   } catch (error) {
+    const attempt = attemptMetadata(provider, error);
+    recordProviderAttempt(options, attempt);
     providerDiagnostic(provider, 'completed', {
       durationMs: Date.now() - startedAt,
       success: false,
       fallbackOccurred,
+      failureCategory: attempt.category,
+      errorCode: attempt.errorCode,
+      outcome: attempt.outcome,
       ...(providerStatus(error) ? { providerStatus: providerStatus(error) } : {}),
       ...(isTimeout(error) ? { timeout: true } : {}),
     });
@@ -131,12 +198,6 @@ function isTemporaryProviderFailure(error) {
   return error.retryable === true;
 }
 
-function providerFailureOutcome(error) {
-  if (error?.kind === 'configuration') return 'configuration_failure';
-  if (error?.kind === 'invalid_response') return 'invalid_output';
-  return isTemporaryProviderFailure(error) ? 'temporary_failure' : 'permanent_failure';
-}
-
 function getGeminiClient(options, apiKey, timeoutMs) {
   const httpOptions = { timeout: timeoutMs, retryOptions: { attempts: 1 } };
   return options.client || (options.clientFactory
@@ -147,28 +208,39 @@ function getGeminiClient(options, apiKey, timeoutMs) {
 async function requestGemini(source, prompt, options, fallbackOccurred) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey && !options.client && !options.clientFactory) {
-    throw new GeminiAnalysisError('Gemini is not configured on the server.', { status: 503, kind: 'configuration', provider: 'gemini' });
+    const error = new GeminiAnalysisError('Gemini is not configured on the server.', { status: 503, kind: 'configuration', provider: 'gemini' });
+    recordProviderAttempt(options, attemptMetadata('gemini', error));
+    error.providerAttempts = options.providerAttempts;
+    throw error;
   }
   const timeoutMs = options.timeoutMs || GEMINI_TIMEOUT_MS;
   const maxRetries = options.maxRetries === undefined ? GEMINI_MAX_RETRIES : options.maxRetries;
   const sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const client = getGeminiClient(options, apiKey, timeoutMs);
+  let client;
+  try { client = getGeminiClient(options, apiKey, timeoutMs); }
+  catch {
+    const error = new GeminiAnalysisError('Gemini could not be initialized with the server configuration.', { status: 503, kind: 'configuration', provider: 'gemini' });
+    recordProviderAttempt(options, attemptMetadata('gemini', error));
+    error.providerAttempts = options.providerAttempts;
+    throw error;
+  }
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
       const response = await measuredRequest('gemini', () => client.models.generateContent({
         model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
         contents: prompt,
-      }), fallbackOccurred);
+      }), fallbackOccurred, options);
       return { response, provider: 'gemini' };
     } catch (error) {
       const retry = attempt < maxRetries && isRetryable(error);
       providerDiagnostic('gemini', 'retry', { attempt: attempt + 1, maxAttempts: maxRetries + 1, retrying: retry, fallbackOccurred });
       if (!retry) {
-        throw new GeminiAnalysisError(
+        const analysisError = new GeminiAnalysisError(
           isTimeout(error) ? 'Gemini analysis timed out.' : 'Gemini could not complete the analysis.',
-          { status: publicProviderStatus(error), kind: isTimeout(error) ? 'timeout' : 'provider', provider: 'gemini', providerStatus: providerStatus(error), retryable: isRetryable(error), cause: error },
+          { status: publicProviderStatus(error), kind: isTimeout(error) ? 'timeout' : 'provider', provider: 'gemini', providerStatus: providerStatus(error), retryable: isRetryable(error), cause: error, providerAttempts: options.providerAttempts },
         );
+        throw analysisError;
       }
       await sleep(500 * (2 ** attempt));
     }
@@ -180,7 +252,10 @@ async function requestCloudflare(source, prompt, options, fallbackOccurred) {
   const accountId = String(Object.hasOwn(options, 'cloudflareAccountId') ? options.cloudflareAccountId || '' : process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
   const apiToken = String(Object.hasOwn(options, 'cloudflareApiToken') ? options.cloudflareApiToken || '' : process.env.CLOUDFLARE_API_TOKEN || '').trim();
   if (!accountId || !apiToken) {
-    throw new GeminiAnalysisError('Cloudflare Workers AI is not configured on the server.', { status: 503, kind: 'configuration', provider: 'cloudflare' });
+    const error = new GeminiAnalysisError('Cloudflare Workers AI is not configured on the server.', { status: 503, kind: 'configuration', provider: 'cloudflare' });
+    recordProviderAttempt(options, attemptMetadata('cloudflare', error));
+    error.providerAttempts = options.providerAttempts;
+    throw error;
   }
   const timeoutMs = options.cloudflareTimeoutMs || GEMINI_TIMEOUT_MS;
   const maxRetries = options.cloudflareMaxRetries === undefined ? GEMINI_MAX_RETRIES : options.cloudflareMaxRetries;
@@ -223,7 +298,7 @@ async function requestCloudflare(source, prompt, options, fallbackOccurred) {
         catch (cause) {
           throw new GeminiAnalysisError('Cloudflare returned an unreadable analysis response.', { status: 502, kind: 'invalid_response', provider: 'cloudflare', cause });
         }
-      }, fallbackOccurred);
+      }, fallbackOccurred, options);
       return { response: payload, provider: 'cloudflare' };
     } catch (error) {
       const analysisError = error instanceof GeminiAnalysisError
@@ -231,7 +306,10 @@ async function requestCloudflare(source, prompt, options, fallbackOccurred) {
         : new GeminiAnalysisError('Cloudflare Workers AI request failed.', { status: 503, kind: 'provider', provider: 'cloudflare', retryable: isRetryable(error), cause: error });
       const retry = attempt < maxRetries && isTemporaryProviderFailure(analysisError);
       providerDiagnostic('cloudflare', 'retry', { attempt: attempt + 1, maxAttempts: maxRetries + 1, retrying: retry, fallbackOccurred });
-      if (!retry) throw analysisError;
+      if (!retry) {
+        analysisError.providerAttempts = options.providerAttempts;
+        throw analysisError;
+      }
       await sleep(500 * (2 ** attempt));
     }
   }
@@ -256,6 +334,7 @@ function cloudflareModelText(payload) {
 }
 
 export async function extractFindings(source, options = {}) {
+  options = { ...options, providerAttempts: [] };
   const prompt = createPrompt(source);
   const primaryProvider = options.primaryProvider || DEFAULT_ANALYSIS_PROVIDER;
   if (!['cloudflare', 'gemini'].includes(primaryProvider)) throw new TypeError('Unsupported analysis provider selection.');
@@ -281,12 +360,8 @@ export async function extractFindings(source, options = {}) {
         ? await requestCloudflare(source, prompt, options, true)
         : await requestGemini(source, prompt, options, true);
     } catch (fallbackError) {
-      const attempts = [
-        { provider: providers[0], outcome: providerFailureOutcome(primaryError) },
-        { provider: providers[1], outcome: providerFailureOutcome(fallbackError) },
-      ];
+      if (fallbackError instanceof GeminiAnalysisError) fallbackError.providerAttempts = options.providerAttempts;
       if (fallbackError instanceof GeminiAnalysisError && fallbackError.kind === 'invalid_response') {
-        fallbackError.providerAttempts = attempts;
         throw fallbackError;
       }
       throw new GeminiAnalysisError('Neither AI provider could complete the analysis.', {
@@ -295,7 +370,7 @@ export async function extractFindings(source, options = {}) {
         provider: fallbackError.provider || providers[1],
         providerStatus: fallbackError.providerStatus,
         retryable: fallbackError.retryable,
-        providerAttempts: attempts,
+        providerAttempts: options.providerAttempts,
       });
     }
   }
@@ -307,6 +382,9 @@ export async function extractFindings(source, options = {}) {
     findings = parseFindings(response, source, strict, providerResult.provider);
   } catch (error) {
     if (error instanceof GeminiAnalysisError && error.kind === 'invalid_response') {
+      const latestAttempt = options.providerAttempts.at(-1);
+      if (latestAttempt) Object.assign(latestAttempt, { outcome: 'invalid_output', category: 'invalid_output', errorCode: 'invalid_output' });
+      error.providerAttempts = options.providerAttempts;
       providerDiagnostic(providerResult.provider, 'validationFailed', { fallbackOccurred, reason: error.kind });
     }
     throw error;
@@ -316,5 +394,6 @@ export async function extractFindings(source, options = {}) {
     findingCount: findings.length,
     allEvidenceVerified: findings.every((finding) => finding.evidence.every((item) => item.verificationStatus === 'verified')),
   });
+  Object.defineProperty(findings, 'providerAttempts', { value: options.providerAttempts, enumerable: false });
   return findings;
 }

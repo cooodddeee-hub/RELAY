@@ -20,20 +20,36 @@ export function publicAnalysisJob(job, now = new Date()) {
 export function isEligibleDemoFallback(job) {
   if (!job || job.status !== 'failed' || !['cloudflare_provider', 'cloudflare_timeout'].includes(job.lastErrorKind)) return false;
   const attempts = job.lastProviderAttempts || [];
-  return attempts.length === 2
-    && attempts[0]?.provider === 'gemini' && attempts[0]?.outcome === 'temporary_failure'
-    && attempts[1]?.provider === 'cloudflare' && attempts[1]?.outcome === 'temporary_failure';
+  if (attempts.length < 2) return false;
+  let sawCloudflare = false;
+  let sawGemini = false;
+  for (const attempt of attempts) {
+    if (attempt?.outcome !== 'temporary_failure') return false;
+    if (attempt.category !== undefined) {
+      if (!['timeout', 'http', 'network'].includes(attempt.category)) return false;
+      if (attempt.category === 'http' && ![408, 429, 500, 502, 503, 504].includes(attempt.status)) return false;
+    }
+    if (attempt.provider === 'gemini' && !sawCloudflare) sawGemini = true;
+    else if (attempt.provider === 'cloudflare') sawCloudflare = true;
+    else return false;
+  }
+  return sawGemini && sawCloudflare;
 }
 
 export function safeProviderAttempts(attempts) {
   const providers = ['gemini', 'cloudflare'];
-  const outcomes = ['temporary_failure', 'permanent_failure', 'invalid_output', 'configuration_failure'];
+  const outcomes = ['success', 'temporary_failure', 'permanent_failure', 'invalid_output', 'configuration_failure'];
+  const categories = ['success', 'timeout', 'http', 'network', 'configuration', 'invalid_output', 'unknown'];
+  const errorCodes = ['none', 'timeout', 'http_error', 'network_error', 'connection_error', 'configuration_error', 'invalid_output', 'unknown'];
   if (!Array.isArray(attempts)) return [];
-  return attempts.slice(0, 2).flatMap((attempt) => (
-    providers.includes(attempt?.provider) && outcomes.includes(attempt?.outcome)
-      ? [{ provider: attempt.provider, outcome: attempt.outcome }]
-      : []
-  ));
+  return attempts.slice(0, 8).flatMap((attempt) => {
+    if (!providers.includes(attempt?.provider) || !outcomes.includes(attempt?.outcome)) return [];
+    const safe = { provider: attempt.provider, outcome: attempt.outcome };
+    if (Number.isInteger(attempt.status) && attempt.status >= 100 && attempt.status <= 599) safe.status = attempt.status;
+    if (categories.includes(attempt.category)) safe.category = attempt.category;
+    if (errorCodes.includes(attempt.errorCode)) safe.errorCode = attempt.errorCode;
+    return [safe];
+  });
 }
 
 export function analysisRetryUpdate(job, now = new Date()) {

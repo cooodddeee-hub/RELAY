@@ -2,7 +2,10 @@ import mongoose from 'mongoose';
 
 const providerAttemptSchema = new mongoose.Schema({
   provider: { type: String, enum: ['gemini', 'cloudflare'], required: true },
-  outcome: { type: String, enum: ['temporary_failure', 'permanent_failure', 'invalid_output', 'configuration_failure'], required: true },
+  outcome: { type: String, enum: ['success', 'temporary_failure', 'permanent_failure', 'invalid_output', 'configuration_failure'], required: true },
+  status: { type: Number, min: 100, max: 599 },
+  category: { type: String, enum: ['success', 'timeout', 'http', 'network', 'configuration', 'invalid_output', 'unknown'] },
+  errorCode: { type: String, enum: ['none', 'timeout', 'http_error', 'network_error', 'connection_error', 'configuration_error', 'invalid_output', 'unknown'] },
 }, { _id: false });
 
 const schema = new mongoose.Schema({

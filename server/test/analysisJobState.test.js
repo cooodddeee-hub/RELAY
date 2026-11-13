@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, canAccessAnalysisJob,
-  analysisRetryUpdate, isEligibleDemoFallback, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction,
+  analysisRetryUpdate, isEligibleDemoFallback, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction, safeProviderAttempts,
 } from '../src/services/analysisJobState.js';
 import { DEMO_ANALYSIS_FALLBACK } from '../../client/src/data/demoAnalysisFallback.js';
 
@@ -57,6 +57,32 @@ test('demo fallback is exposed only after terminal Gemini and Cloudflare tempora
   };
   assert.equal(isEligibleDemoFallback(job), true);
   assert.equal(publicAnalysisJob(job).demoFallbackAvailable, true);
+});
+
+test('demo fallback accepts complete temporary retry sequences but rejects success or invalid provider order', () => {
+  const valid = [
+    { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
+    { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
+    { provider: 'cloudflare', outcome: 'temporary_failure', status: 504, category: 'timeout', errorCode: 'timeout' },
+  ];
+  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: valid }), true);
+  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: [...valid, { provider: 'cloudflare', outcome: 'success' }] }), false);
+  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: [valid[2], valid[0]] }), false);
+});
+
+test('provider attempt metadata is sanitized and survives the public job status projection', () => {
+  const attempts = safeProviderAttempts([
+    { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error', message: 'private prompt content' },
+    { provider: 'cloudflare', outcome: 'success', category: 'success', errorCode: 'none', token: 'must-not-persist' },
+  ]);
+  assert.deepEqual(attempts, [
+    { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
+    { provider: 'cloudflare', outcome: 'success', category: 'success', errorCode: 'none' },
+  ]);
+  const publicJob = publicAnalysisJob({ _id: 'job-safe', status: 'completed', lastProviderAttempts: attempts });
+  assert.deepEqual(publicJob.lastProviderAttempts, attempts);
+  assert.equal(JSON.stringify(publicJob).includes('private prompt content'), false);
+  assert.equal(JSON.stringify(publicJob).includes('must-not-persist'), false);
 });
 
 test('demo fallback is unavailable for invalid output, permanent/provider configuration errors, or incomplete provider sequences', () => {
