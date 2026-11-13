@@ -11,8 +11,12 @@ import { ensureDatabase } from './middleware/ensureDatabase.js';
 import { logError } from './utils/safeLogger.js';
 
 const app=express();
+const allowedOrigins=(process.env.CLIENT_URL||'http://localhost:5173').split(',').map((origin)=>origin.trim()).filter(Boolean);
+const corsOptions={origin(origin,callback){if(origin&&allowedOrigins.includes(origin))return callback(null,true);return callback(null,false)},credentials:true,optionsSuccessStatus:204};
+const corsMiddleware=cors(corsOptions);
+app.options('*',corsMiddleware,(_req,res)=>res.sendStatus(204));
 app.use(helmet({crossOriginResourcePolicy:{policy:'cross-origin'}}));
-app.use(cors({origin:process.env.CLIENT_URL?.split(',') || 'http://localhost:5173'}));
+app.use(corsMiddleware);
 app.use(express.json({limit:'2mb'}));
 app.use(rateLimit({windowMs:15*60*1000,max:300}));
 app.get('/api/health',ensureDatabase,(_req,res)=>res.json({status:'ok',service:'RELAY API'}));
