@@ -4,7 +4,7 @@ const allowed = ['Decision', 'Completed Work', 'Pending Tasks', 'Responsibilitie
 export const GEMINI_TIMEOUT_MS = 30_000;
 export const GEMINI_MAX_RETRIES = 2;
 export const CLOUDFLARE_MODEL = '@cf/openai/gpt-oss-20b';
-export const DEFAULT_ANALYSIS_PROVIDER = 'gemini';
+export const DEFAULT_ANALYSIS_PROVIDER = 'cloudflare';
 
 export class GeminiAnalysisError extends Error {
   constructor(message, options = {}) {
@@ -128,7 +128,7 @@ function providerDiagnostic(provider, phase, fields = {}) {
   console.info(JSON.stringify({ level: 'info', operation: 'analysis.providerRequest', provider, phase, ...fields }));
 }
 
-function attemptMetadata(provider, error) {
+function attemptMetadata(provider, error, fallbackOccurred = false) {
   const status = providerStatus(error);
   let category = 'unknown';
   let errorCode = 'unknown';
@@ -142,7 +142,7 @@ function attemptMetadata(provider, error) {
   const outcome = error?.kind === 'configuration' ? 'configuration_failure'
     : error?.kind === 'invalid_response' ? 'invalid_output'
       : isRetryable(error) ? 'temporary_failure' : 'permanent_failure';
-  return { provider, outcome, category, errorCode, ...(status === undefined ? {} : { status }) };
+  return { provider, role: fallbackOccurred ? 'secondary' : 'primary', outcome, category, errorCode, ...(status === undefined ? {} : { status }) };
 }
 
 function recordProviderAttempt(options, attempt) {
@@ -154,11 +154,11 @@ async function measuredRequest(provider, request, fallbackOccurred, options) {
   providerDiagnostic(provider, 'started', { fallbackOccurred });
   try {
     const result = await request();
-    recordProviderAttempt(options, { provider, outcome: 'success', category: 'success', errorCode: 'none' });
+    recordProviderAttempt(options, { provider, role: fallbackOccurred ? 'secondary' : 'primary', outcome: 'success', category: 'success', errorCode: 'none' });
     providerDiagnostic(provider, 'completed', { durationMs: Date.now() - startedAt, success: true, fallbackOccurred });
     return result;
   } catch (error) {
-    const attempt = attemptMetadata(provider, error);
+    const attempt = attemptMetadata(provider, error, fallbackOccurred);
     recordProviderAttempt(options, attempt);
     const safeError = safeErrorDiagnostics(error);
     providerDiagnostic(provider, 'completed', {
@@ -247,7 +247,7 @@ async function requestGemini(source, prompt, options, fallbackOccurred) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey && !options.client && !options.clientFactory) {
     const error = new GeminiAnalysisError('Gemini is not configured on the server.', { status: 503, kind: 'configuration', provider: 'gemini' });
-    recordProviderAttempt(options, attemptMetadata('gemini', error));
+    recordProviderAttempt(options, attemptMetadata('gemini', error, fallbackOccurred));
     error.providerAttempts = options.providerAttempts;
     throw error;
   }
@@ -258,7 +258,7 @@ async function requestGemini(source, prompt, options, fallbackOccurred) {
   try { client = getGeminiClient(options, apiKey, timeoutMs); }
   catch {
     const error = new GeminiAnalysisError('Gemini could not be initialized with the server configuration.', { status: 503, kind: 'configuration', provider: 'gemini' });
-    recordProviderAttempt(options, attemptMetadata('gemini', error));
+    recordProviderAttempt(options, attemptMetadata('gemini', error, fallbackOccurred));
     error.providerAttempts = options.providerAttempts;
     throw error;
   }
@@ -291,7 +291,7 @@ async function requestCloudflare(source, prompt, options, fallbackOccurred) {
   const apiToken = String(Object.hasOwn(options, 'cloudflareApiToken') ? options.cloudflareApiToken || '' : process.env.CLOUDFLARE_API_TOKEN || '').trim();
   if (!accountId || !apiToken) {
     const error = new GeminiAnalysisError('Cloudflare Workers AI is not configured on the server.', { status: 503, kind: 'configuration', provider: 'cloudflare' });
-    recordProviderAttempt(options, attemptMetadata('cloudflare', error));
+    recordProviderAttempt(options, attemptMetadata('cloudflare', error, fallbackOccurred));
     error.providerAttempts = options.providerAttempts;
     throw error;
   }

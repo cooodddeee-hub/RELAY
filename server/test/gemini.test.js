@@ -20,6 +20,7 @@ function clientFrom(responses, onCall = () => {}) {
 test('configures the SDK request timeout and disables its built-in retries', async () => {
   let configured;
   const result = await extractFindings(source, {
+    primaryProvider: 'gemini',
     timeoutMs: 12_345,
     clientFactory: (config) => { configured = config; return clientFrom([response]); },
     sleep: async () => {},
@@ -35,7 +36,7 @@ test('configures the SDK request timeout and disables its built-in retries', asy
 
 test('analysis retains paraphrased quotes as unverified evidence with the original source association', async () => {
   const paraphrasedResponse = { text: JSON.stringify({ findings: [{ category: 'Decision', title: 'Beta timing', description: 'The beta was planned for summer.', quote: 'The beta is set for early summer.' }] }) };
-  const result = await extractFindings(source, { client: clientFrom([paraphrasedResponse]) });
+  const result = await extractFindings(source, { primaryProvider: 'gemini', client: clientFrom([paraphrasedResponse]) });
   assert.equal(result[0].evidence[0].quote, 'The beta is set for early summer.');
   assert.equal(result[0].evidence[0].verificationStatus, 'unverified');
   assert.equal(result[0].evidence[0].source, source._id);
@@ -45,7 +46,7 @@ test('analysis retains paraphrased quotes as unverified evidence with the origin
 test('retries temporary 503 failures with exponential backoff then returns real findings', async () => {
   const client = clientFrom([failure(503), failure(503), response]);
   const delays = [];
-  const result = await extractFindings(source, { client, maxRetries: 2, sleep: async (delay) => delays.push(delay) });
+  const result = await extractFindings(source, { primaryProvider: 'gemini', client, maxRetries: 2, sleep: async (delay) => delays.push(delay) });
   assert.equal(client.calls, 3);
   assert.deepEqual(delays, [500, 1000]);
   assert.equal(result[0].title, 'Ship the beta in June');
@@ -54,7 +55,7 @@ test('retries temporary 503 failures with exponential backoff then returns real 
 test('retries 429 rate limits and succeeds without inventing output', async () => {
   const client = clientFrom([failure(429, 'quota temporarily exhausted'), response]);
   const delays = [];
-  const result = await extractFindings(source, { client, maxRetries: 1, sleep: async (delay) => delays.push(delay) });
+  const result = await extractFindings(source, { primaryProvider: 'gemini', client, maxRetries: 1, sleep: async (delay) => delays.push(delay) });
   assert.equal(client.calls, 2);
   assert.deepEqual(delays, [500]);
   assert.equal(result.length, 1);
@@ -66,6 +67,7 @@ test('exhausted Gemini timeouts invoke Cloudflare after the configured retry', a
   const delays = [];
   let fallbackCalls = 0;
   const result = await extractFindings(source, {
+    primaryProvider: 'gemini',
     client, maxRetries: 1, sleep: async (delay) => delays.push(delay),
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
@@ -79,7 +81,7 @@ test('exhausted Gemini timeouts invoke Cloudflare after the configured retry', a
 test('does not retry permanent provider errors or fabricate findings', async () => {
   const client = clientFrom([failure(400, 'invalid request')]);
   await assert.rejects(
-    extractFindings(source, { client, maxRetries: 2, sleep: async () => assert.fail('permanent errors must not retry') }),
+    extractFindings(source, { primaryProvider: 'gemini', client, maxRetries: 2, sleep: async () => assert.fail('permanent errors must not retry') }),
     (error) => error instanceof GeminiAnalysisError && error.status === 502,
   );
   assert.equal(client.calls, 1);
@@ -88,7 +90,7 @@ test('does not retry permanent provider errors or fabricate findings', async () 
 test('does not turn malformed provider output into findings', async () => {
   const client = clientFrom([{ text: 'not JSON' }]);
   await assert.rejects(
-    extractFindings(source, { client }),
+    extractFindings(source, { primaryProvider: 'gemini', client }),
     (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response',
   );
   assert.equal(client.calls, 1);
@@ -97,6 +99,7 @@ test('does not turn malformed provider output into findings', async () => {
 test('malformed Gemini output does not trigger Cloudflare fallback', async () => {
   let fallbackCalls = 0;
   await assert.rejects(extractFindings(source, {
+    primaryProvider: 'gemini',
     client: clientFrom([{ text: 'not JSON' }]),
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
@@ -110,6 +113,7 @@ test('Gemini output with unverified evidence does not trigger a fallback provide
     category: 'Decision', title: 'Unsupported decision', description: 'This quote is not in the source.', quote: 'An invented quotation.',
   }] }) };
   const findings = await extractFindings(source, {
+    primaryProvider: 'gemini',
     client: clientFrom([unverifiedResponse]),
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
@@ -131,17 +135,17 @@ function cloudflareResponse(findings = [{ category: 'Decision', title: 'Ship the
   return { ok: true, status: 200, json: async () => ({ success: true, result: { response: JSON.stringify({ findings }) } }) };
 }
 
-test('Gemini succeeds without calling Cloudflare', async () => {
-  let fallbackCalls = 0;
+test('Cloudflare is the default primary and succeeds without calling Gemini', async () => {
+  let geminiCalls = 0;
   const result = await extractFindings(source, {
-    client: clientFrom([response]),
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
-    cloudflareFetch: async () => { fallbackCalls += 1; throw new Error('must not be called'); },
+    cloudflareFetch: async () => cloudflareResponse(),
+    client: { models: { generateContent: async () => { geminiCalls += 1; return response; } } },
   });
   assert.equal(result.length, 1);
-  assert.equal(fallbackCalls, 0);
+  assert.equal(geminiCalls, 0);
   assert.deepEqual(result.providerAttempts, [
-    { provider: 'gemini', outcome: 'success', category: 'success', errorCode: 'none' },
+    { provider: 'cloudflare', role: 'primary', outcome: 'success', category: 'success', errorCode: 'none' },
   ]);
 });
 
@@ -153,6 +157,7 @@ test('SDK ApiError wrapped as a cause is retried and then invokes Cloudflare', a
   const delays = [];
   let fallbackCalls = 0;
   const result = await extractFindings(source, {
+    primaryProvider: 'gemini',
     client, maxRetries: 2, sleep: async (delay) => delays.push(delay),
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
@@ -170,9 +175,8 @@ test('SDK ApiError wrapped as a cause is retried and then invokes Cloudflare', a
   assert.equal(result[0].evidence[0].source, source._id);
 });
 
-test('Cloudflare success metadata passes the persistence sanitizer and public status projection', async () => {
+test('Cloudflare primary success metadata passes the persistence sanitizer and public status projection', async () => {
   const findings = await extractFindings(source, {
-    client: clientFrom([failure(503)]), maxRetries: 0,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
     cloudflareFetch: async () => cloudflareResponse(),
   });
@@ -183,9 +187,8 @@ test('Cloudflare success metadata passes the persistence sanitizer and public st
     status: 'completed',
     lastProviderAttempts: safeProviderAttempts(findings.providerAttempts),
   });
-  assert.deepEqual(jobStatus.lastProviderAttempts.map(({ provider, outcome }) => ({ provider, outcome })), [
-    { provider: 'gemini', outcome: 'temporary_failure' },
-    { provider: 'cloudflare', outcome: 'success' },
+  assert.deepEqual(jobStatus.lastProviderAttempts.map(({ provider, role, outcome }) => ({ provider, role, outcome })), [
+    { provider: 'cloudflare', role: 'primary', outcome: 'success' },
   ]);
   assert.equal(jobStatus.demoFallbackAvailable, false);
 });
@@ -195,6 +198,7 @@ test('installed SDK APIConnectionTimeoutError shape is retryable through its ded
   const client = clientFrom([timeout, timeout]);
   let fallbackCalls = 0;
   const result = await extractFindings(source, {
+    primaryProvider: 'gemini',
     client, maxRetries: 1, sleep: async () => {}, cloudflareMaxRetries: 0,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
@@ -210,6 +214,7 @@ test('SDK APIUserAbortError is a cancellation and never invokes Cloudflare', asy
   let fallbackCalls = 0;
   const client = clientFrom([userAbort]);
   await assert.rejects(extractFindings(source, {
+    primaryProvider: 'gemini',
     client, maxRetries: 2,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
@@ -218,15 +223,14 @@ test('SDK APIUserAbortError is a cancellation and never invokes Cloudflare', asy
   assert.equal(fallbackCalls, 0);
 });
 
-test('Cloudflare candidate is configured with the selected model and is not enabled as primary before live validation', () => {
+test('Cloudflare is configured with the validated model and is the default primary provider', () => {
   assert.equal(CLOUDFLARE_MODEL, '@cf/openai/gpt-oss-20b');
-  assert.equal(DEFAULT_ANALYSIS_PROVIDER, 'gemini');
+  assert.equal(DEFAULT_ANALYSIS_PROVIDER, 'cloudflare');
 });
 
 test('Cloudflare primary validates schema, exact evidence, and source association', async () => {
   let request;
   const result = await extractFindings(source, {
-    primaryProvider: 'cloudflare',
     cloudflareAccountId: 'test-account',
     cloudflareApiToken: 'test-token',
     cloudflareMaxRetries: 0,
@@ -253,6 +257,7 @@ test('Gemini bounded retries exhaust before Cloudflare fallback failure and pres
   const delays = [];
   const geminiTemporaryFailure = Object.assign(new Error('temporary provider failure'), { status: 503 });
   await assert.rejects(extractFindings(source, {
+    primaryProvider: 'gemini',
     client: { models: { generateContent: async () => { geminiCalls += 1; throw geminiTemporaryFailure; } } },
     maxRetries: 1,
     cloudflareAccountId: 'test-account',
@@ -307,6 +312,7 @@ test('provider failure diagnostics include safe error classes, recognized codes,
   const cause = Object.assign(new ApiError({ status: 502, message: 'sensitive upstream detail' }), { code: 'ECONNRESET' });
   try {
     await assert.rejects(extractFindings(source, {
+    primaryProvider: 'gemini',
       client: clientFrom([Object.assign(new Error('private outer message'), { cause })]),
       maxRetries: 0,
       cloudflareAccountId: 'test-account',
@@ -344,7 +350,6 @@ test('Cloudflare retries temporary errors and falls back to Gemini after exhaust
   let cloudflareCalls = 0;
   const delays = [];
   const result = await extractFindings(source, {
-    primaryProvider: 'cloudflare',
     cloudflareAccountId: 'test-account',
     cloudflareApiToken: 'test-token',
     cloudflareMaxRetries: 1,
@@ -356,12 +361,16 @@ test('Cloudflare retries temporary errors and falls back to Gemini after exhaust
   assert.equal(cloudflareCalls, 2);
   assert.deepEqual(delays, [500]);
   assert.equal(result[0].evidence[0].source, source._id);
+  assert.deepEqual(result.providerAttempts.map(({ provider, role }) => ({ provider, role })), [
+    { provider: 'cloudflare', role: 'primary' },
+    { provider: 'cloudflare', role: 'primary' },
+    { provider: 'gemini', role: 'secondary' },
+  ]);
 });
 
 test('Cloudflare authentication and permanent response failures do not fall back', async () => {
   let geminiCalls = 0;
   await assert.rejects(extractFindings(source, {
-    primaryProvider: 'cloudflare',
     cloudflareAccountId: 'test-account',
     cloudflareApiToken: 'test-token',
     cloudflareMaxRetries: 2,
@@ -391,7 +400,7 @@ for (const status of [401, 403]) {
   test(`Gemini HTTP ${status} authentication/permission failures do not invoke Cloudflare`, async () => {
     let fallbackCalls = 0;
     await assert.rejects(extractFindings(source, {
-      client: clientFrom([failure(status, 'auth or permission failure')]), maxRetries: 0,
+      primaryProvider: 'gemini', client: clientFrom([failure(status, 'auth or permission failure')]), maxRetries: 0,
       cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
       cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
     }), (error) => error instanceof GeminiAnalysisError && error.providerStatus === status);
@@ -405,7 +414,7 @@ test('Gemini network failures invoke Cloudflare after retry budget', async () =>
   const delays = [];
   const client = clientFrom([networkError, networkError]);
   const result = await extractFindings(source, {
-    client, maxRetries: 1, sleep: async (delay) => delays.push(delay),
+    primaryProvider: 'gemini', client, maxRetries: 1, sleep: async (delay) => delays.push(delay),
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
   });
@@ -418,7 +427,7 @@ test('Gemini network failures invoke Cloudflare after retry budget', async () =>
 test('unclassified Gemini application errors do not invoke Cloudflare', async () => {
   let fallbackCalls = 0;
   await assert.rejects(extractFindings(source, {
-    client: clientFrom([new TypeError('unexpected application failure')]), maxRetries: 0,
+    primaryProvider: 'gemini', client: clientFrom([new TypeError('unexpected application failure')]), maxRetries: 0,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
   }), (error) => error instanceof GeminiAnalysisError && error.provider === 'gemini');
@@ -429,7 +438,7 @@ test('an unrelated Gemini error mentioning network is not retried or sent to Clo
   let fallbackCalls = 0;
   const client = clientFrom([new Error('network field validation failed')]);
   await assert.rejects(extractFindings(source, {
-    client, maxRetries: 2,
+    primaryProvider: 'gemini', client, maxRetries: 2,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
   }), (error) => error instanceof GeminiAnalysisError && error.retryable === false && error.kind === 'provider');
@@ -446,17 +455,17 @@ test('Cloudflare provider errors are sanitized and surfaced', async () => {
   }), (error) => error instanceof GeminiAnalysisError && error.status === 503 && !error.message.includes('private provider detail'));
 });
 
-test('Cloudflare exhausted temporary attempts preserve both providers and safe classification metadata', async () => {
+test('Cloudflare exhausted temporary attempts invoke Gemini and preserve both providers metadata', async () => {
   await assert.rejects(extractFindings(source, {
-    client: clientFrom([failure(503)]), maxRetries: 0,
-    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 1,
+    client: clientFrom([failure(503)]), maxRetries: 0, cloudflareMaxRetries: 1,
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => ({ ok: false, status: 503 }),
     sleep: async () => {},
   }), (error) => {
     assert.deepEqual(error.providerAttempts.map(({ provider, outcome, status, category, errorCode }) => ({ provider, outcome, status, category, errorCode })), [
+      { provider: 'cloudflare', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
+      { provider: 'cloudflare', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
       { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
-      { provider: 'cloudflare', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
-      { provider: 'cloudflare', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
     ]);
     assert.equal(error.kind, 'provider');
     assert.equal(error.retryable, true);
@@ -465,15 +474,15 @@ test('Cloudflare exhausted temporary attempts preserve both providers and safe c
   });
 });
 
-test('Gemini and eligible Cloudflare temporary failures carry only safe provider attempt metadata', async () => {
+test('Cloudflare and eligible Gemini temporary failures carry primary/secondary metadata', async () => {
   await assert.rejects(extractFindings(source, {
     client: clientFrom([failure(503)]), maxRetries: 0,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
     cloudflareFetch: async () => ({ ok: false, status: 503 }),
   }), (error) => {
     assert.deepEqual(error.providerAttempts, [
-      { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
-      { provider: 'cloudflare', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
+      { provider: 'cloudflare', role: 'primary', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
+      { provider: 'gemini', role: 'secondary', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
     ]);
     assert.equal(JSON.stringify(error.providerAttempts).includes(source.extractedText), false);
     assert.equal(JSON.stringify(error.providerAttempts).includes('test-token'), false);
@@ -481,15 +490,13 @@ test('Gemini and eligible Cloudflare temporary failures carry only safe provider
   });
 });
 
-test('a permanent Cloudflare fallback failure is recorded as non-eligible for demo fallback', async () => {
+test('a permanent Cloudflare primary failure is recorded and does not invoke Gemini', async () => {
   await assert.rejects(extractFindings(source, {
-    client: clientFrom([failure(503)]), maxRetries: 0,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
     cloudflareFetch: async () => ({ ok: false, status: 401 }),
   }), (error) => {
     assert.deepEqual(error.providerAttempts, [
-      { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
-      { provider: 'cloudflare', outcome: 'permanent_failure', status: 401, category: 'http', errorCode: 'http_error' },
+      { provider: 'cloudflare', role: 'primary', outcome: 'permanent_failure', status: 401, category: 'http', errorCode: 'http_error' },
     ]);
     return error instanceof GeminiAnalysisError && error.kind === 'provider';
   });
@@ -500,6 +507,7 @@ test('a wrapped Gemini authentication failure does not retry or invoke Cloudflar
   const wrapped401 = Object.assign(new Error('request failed'), { cause: { error: { status: 401 } } });
   const client = clientFrom([wrapped401]);
   await assert.rejects(extractFindings(source, {
+    primaryProvider: 'gemini',
     client, maxRetries: 2, cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
   }), (error) => error instanceof GeminiAnalysisError && error.providerStatus === 401 && error.retryable === false);
@@ -510,6 +518,7 @@ test('a wrapped Gemini authentication failure does not retry or invoke Cloudflar
 test('Gemini client configuration errors do not invoke Cloudflare', async () => {
   let fallbackCalls = 0;
   await assert.rejects(extractFindings(source, {
+    primaryProvider: 'gemini',
     clientFactory: () => { throw new Error('invalid local SDK configuration'); },
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => { fallbackCalls += 1; return cloudflareResponse(); },
@@ -588,7 +597,7 @@ test('both providers failing returns a safe fallback error', async () => {
     client: clientFrom([failure(503)]), maxRetries: 0,
     cloudflareMaxRetries: 0,
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
-    cloudflareFetch: async () => { throw new Error('network failure including a private URL'); },
+    cloudflareFetch: async () => ({ ok: false, status: 503 }),
   }), (error) => error instanceof GeminiAnalysisError && error.status === 503 && error.message === 'Neither AI provider could complete the analysis.');
 });
 

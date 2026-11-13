@@ -75,11 +75,11 @@ An authenticated owner or editor uploads one file as multipart field `file` to t
 
 Source listing omits extracted text and storage paths. Authorized project members can request extracted text or download the original file. Local disk storage means deployments need persistent private storage if server disks are ephemeral or requests can reach multiple instances.
 
-## Gemini analysis and finding generation
+## AI analysis and finding generation
 
-An owner or editor starts analysis for a project. The API selects processed sources that have not already been analyzed, takes a project-level lock, and processes sources with limited concurrency. Gemini remains primary. It receives at most the first 45,000 characters of each source’s extracted text, requests structured findings in the supported categories, uses a 30-second timeout, and retries temporary failures up to two times with backoff. On exhausted temporary HTTP 408, 429, 500, 502, 503, or 504 failures, recognized network failures, or timeouts, the service makes bounded retries to Cloudflare Workers AI using `@cf/openai/gpt-oss-20b`. Cloudflare credentials/authentication errors, input errors, and malformed or unsupported output do not trigger another provider fallback.
+An owner or editor starts analysis for a project. The API selects processed sources that have not already been analyzed, takes a project-level lock, and processes sources with limited concurrency. Cloudflare Workers AI (`@cf/openai/gpt-oss-20b`) is primary. It receives at most the first 45,000 characters of each source’s extracted text, requests structured findings in the supported categories, uses a 30-second timeout, and retries recognized temporary failures with bounded backoff. On exhausted temporary HTTP 408, 429, 500, 502, 503, or 504 failures, recognized network failures, or timeouts, the service makes bounded retries to Gemini. Cloudflare or Gemini authentication/configuration errors, input errors, and malformed or unsupported output do not trigger another provider fallback. Attempt records identify each provider as primary or secondary.
 
-Gemini responses retain the existing quote-verification behavior. Cloudflare output must match the finding contract, and every fallback quote must verify against the original extracted text before it is accepted; fallback section/page metadata is omitted because it is not independently verified. Malformed fallback data or unsupported quotes produce a sanitized error and no findings for that source. Accepted findings remain pending. Provider diagnostics record provider, request start/completion, duration, and fallback state only; they do not log prompts, extracted text, credentials, or signed URLs. A live synthetic check of GPT-OSS 20B returned HTTP 200 but no usable message content for RELAY’s analysis prompt, so Gemini remains primary until candidate output passes validation. A source analysis marker and finding writes are protected by a MongoDB transaction and stable analysis keys/legacy lookup to prevent duplicate findings on retry. A provider failure does not delete the uploaded source. Provider availability, quota, output quality, and model access depend on configuration and provider accounts.
+Cloudflare output must match the finding contract, and every Cloudflare quote must verify against the original extracted text before it is accepted; its section/page metadata is omitted because it is not independently verified. Gemini responses retain their existing quote-verification behavior. Malformed fallback data or unsupported quotes produce a sanitized error and no findings for that source. Accepted findings remain pending. Provider diagnostics record provider, request start/completion, duration, and fallback state only; they do not log prompts, extracted text, credentials, or signed URLs. A source analysis marker and finding writes are protected by a MongoDB transaction and stable analysis keys/legacy lookup to prevent duplicate findings on retry. A provider failure does not delete the uploaded source. Provider availability, quota, output quality, and model access depend on configuration and provider accounts.
 
 ```mermaid
 flowchart TD
@@ -87,14 +87,14 @@ flowchart TD
     Store --> Extract[Extract and persist source text]
     Extract --> Request[Owner/editor starts project analysis]
     Request --> Lock[Acquire project analysis lock]
-    Lock --> Gemini[Call Gemini for unprocessed sources]
-    Gemini -->|Valid response| Parse[Parse allowed finding categories]
-    Gemini -->|Temporary failure after retries| Cloudflare[Bounded Cloudflare Workers AI retries]
-    Cloudflare --> Parse
-    Cloudflare -->|Malformed or unsupported evidence| Error[Sanitized analysis error; source remains stored]
+    Lock --> Cloudflare[Call Cloudflare Workers AI for unprocessed sources]
+    Cloudflare -->|Valid response| Parse[Parse allowed finding categories]
+    Cloudflare -->|Temporary failure after retries| Gemini[Bounded Gemini retries]
+    Gemini --> Parse
+    Cloudflare -->|Permanent failure or invalid output| Error[Sanitized analysis error; source remains stored]
     Parse --> Verify[Compare each returned quote to stored source text]
     Verify --> Save[Save findings as pending with analysis key]
-    Gemini -->|Permanent failure or fallback failure| Error
+    Gemini -->|Failure or invalid output| Error
 ```
 
 ## Evidence verification

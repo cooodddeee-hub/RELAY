@@ -927,14 +927,14 @@ function renderAnalysisJob() {
   }
   if (active.status === 'failed') {
     const failureMessages = {
-      gemini_timeout: 'Gemini did not respond before its request timeout. No findings were saved for this source.',
-      cloudflare_timeout: 'The Cloudflare fallback did not respond before its request timeout. No findings were saved for this source.',
-      gemini_provider: 'The Gemini request failed after its retry policy. No findings were saved for this source.',
-      cloudflare_provider: 'The Cloudflare fallback request failed after its retry policy. No findings were saved for this source.',
+      gemini_timeout: 'The Gemini secondary provider did not respond before its request timeout. No findings were saved for this source.',
+      cloudflare_timeout: 'The Cloudflare analysis provider did not respond before its request timeout. No findings were saved for this source.',
+      gemini_provider: 'The Gemini secondary provider failed after its retry policy. No findings were saved for this source.',
+      cloudflare_provider: 'The Cloudflare analysis provider failed after its retry policy. No findings were saved for this source.',
       gemini_invalid_response: 'Gemini output failed RELAY validation. No findings were saved for this source.',
       cloudflare_invalid_response: 'Cloudflare output failed RELAY schema or evidence validation. No findings were saved for this source.',
       gemini_configuration: 'Gemini is not configured correctly for this deployment.',
-      cloudflare_configuration: 'Cloudflare fallback is not configured correctly for this deployment.',
+      cloudflare_configuration: 'The Cloudflare analysis provider is not configured correctly for this deployment.',
       step_budget_exceeded: 'Analysis exceeded its safe processing time. No findings were saved for this source.',
       source_unavailable: 'The source could not be read for analysis. No findings were saved for this source.',
       analysis_error: 'Analysis stopped before this source was committed. Check provider and function logs for the failure category.',
@@ -948,7 +948,7 @@ function renderAnalysisJob() {
       const demo = node('section', undefined, 'mt-5 rounded-2xl border border-amber-300/25 bg-amber-400/[0.06] p-4 sm:p-5');
       demo.append(node('p', DEMO_ANALYSIS_FALLBACK.label, 'inline-flex rounded-full border border-amber-200/30 bg-amber-300/10 px-3 py-1 text-[11px] font-bold tracking-wide text-amber-100'));
       demo.append(node('h3', 'Live analysis failed · sample demonstration opened', 'mt-3 text-base font-semibold text-white'));
-      demo.append(node('p', 'Gemini and its eligible Cloudflare fallback both failed. Your real project, sources, findings, and retry remain unchanged. The sample below is separate and is not part of this project.', 'mt-1 text-sm leading-6 text-white/65'));
+      demo.append(node('p', 'Cloudflare and its eligible Gemini secondary fallback both failed. Your real project, sources, findings, and retry remain unchanged. The sample below is separate and is not part of this project.', 'mt-1 text-sm leading-6 text-white/65'));
 
       const report = node('div', undefined, 'mt-4 rounded-xl border border-white/10 bg-black/15 p-4');
       report.append(node('p', DEMO_ANALYSIS_FALLBACK.label, 'text-[10px] font-bold tracking-widest text-amber-100/80'));

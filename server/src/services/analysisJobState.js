@@ -18,26 +18,28 @@ export function publicAnalysisJob(job, now = new Date()) {
 }
 
 export function isEligibleDemoFallback(job) {
-  if (!job || job.status !== 'failed' || !['cloudflare_provider', 'cloudflare_timeout'].includes(job.lastErrorKind)) return false;
+  if (!job || job.status !== 'failed' || !['cloudflare_provider', 'cloudflare_timeout', 'gemini_provider', 'gemini_timeout'].includes(job.lastErrorKind)) return false;
   const attempts = job.lastProviderAttempts || [];
   if (attempts.length < 2) return false;
-  let sawCloudflare = false;
-  let sawGemini = false;
+  const providerOrder = [];
   for (const attempt of attempts) {
     if (attempt?.outcome !== 'temporary_failure') return false;
     if (attempt.category !== undefined) {
       if (!['timeout', 'http', 'network'].includes(attempt.category)) return false;
       if (attempt.category === 'http' && ![408, 429, 500, 502, 503, 504].includes(attempt.status)) return false;
     }
-    if (attempt.provider === 'gemini' && !sawCloudflare) sawGemini = true;
-    else if (attempt.provider === 'cloudflare') sawCloudflare = true;
-    else return false;
+    if (providerOrder.at(-1) !== attempt.provider) providerOrder.push(attempt.provider);
   }
-  return sawGemini && sawCloudflare;
+  if (providerOrder.length !== 2 || !providerOrder.includes('cloudflare') || !providerOrder.includes('gemini')) return false;
+  const primary = providerOrder[0];
+  const secondary = providerOrder[1];
+  return attempts.every((attempt) => attempt.role === undefined
+    || attempt.role === (attempt.provider === primary ? 'primary' : attempt.provider === secondary ? 'secondary' : null));
 }
 
 export function safeProviderAttempts(attempts) {
   const providers = ['gemini', 'cloudflare'];
+  const roles = ['primary', 'secondary'];
   const outcomes = ['success', 'temporary_failure', 'permanent_failure', 'invalid_output', 'configuration_failure'];
   const categories = ['success', 'timeout', 'http', 'network', 'configuration', 'invalid_output', 'unknown'];
   const errorCodes = ['none', 'timeout', 'http_error', 'network_error', 'connection_error', 'configuration_error', 'invalid_output', 'unknown'];
@@ -45,6 +47,7 @@ export function safeProviderAttempts(attempts) {
   return attempts.slice(0, 8).flatMap((attempt) => {
     if (!providers.includes(attempt?.provider) || !outcomes.includes(attempt?.outcome)) return [];
     const safe = { provider: attempt.provider, outcome: attempt.outcome };
+    if (roles.includes(attempt.role)) safe.role = attempt.role;
     if (Number.isInteger(attempt.status) && attempt.status >= 100 && attempt.status <= 599) safe.status = attempt.status;
     if (categories.includes(attempt.category)) safe.category = attempt.category;
     if (errorCodes.includes(attempt.errorCode)) safe.errorCode = attempt.errorCode;

@@ -65,8 +65,8 @@ Set the following variables in `server/.env` using your own local values. Keep r
 | `JWT_SECRET` | Private signing secret for authentication tokens. |
 | `GEMINI_API_KEY` | Server-side Gemini credential. |
 | `GEMINI_MODEL` | Optional Gemini model identifier. Confirm its availability with your provider before setting it; RELAY does not guarantee availability of a particular model name. |
-| `CLOUDFLARE_ACCOUNT_ID` | Server-side Cloudflare account ID used only for Workers AI fallback. |
-| `CLOUDFLARE_API_TOKEN` | Server-side token with Workers AI permission, used only for fallback. |
+| `CLOUDFLARE_ACCOUNT_ID` | Server-side Cloudflare account ID used by Workers AI analysis. |
+| `CLOUDFLARE_API_TOKEN` | Server-side token with Workers AI permission. |
 
 Then install and start the API in the same terminal:
 
@@ -115,9 +115,9 @@ Only the project owner can add existing registered RELAY users, change their Edi
 
 RELAY accepts **PDF, DOCX, TXT, and MD** files, with a **15 MB per-file limit**. PDF and DOCX text is extracted server-side; TXT and Markdown are read as text. Original uploaded files are stored locally under `server/uploads`.
 
-Gemini remains the primary provider for findings analysis. After Gemini's bounded retries, RELAY invokes Cloudflare Workers AI (`@cf/openai/gpt-oss-20b`) only for temporary HTTP 408, 429, 500, 502, 503, or 504 failures, recognized network failures, or timeouts. Authentication, permission, input, and malformed-response errors do not trigger fallback. Cloudflare retries temporary errors with bounded backoff. Configure both providers on the server; Cloudflare credentials are never sent to the browser.
+Cloudflare Workers AI (`@cf/openai/gpt-oss-20b`) is the primary provider for findings analysis. It retries recognized temporary failures with bounded backoff. After those retries are exhausted, RELAY invokes Gemini only for temporary HTTP 408, 429, 500, 502, 503, or 504 failures, recognized network failures, or timeouts. Authentication, permission, input, and malformed-response errors do not trigger provider fallback. Configure both providers on the server; Cloudflare credentials are never sent to the browser.
 
-Both providers propose findings from extracted source text. The application checks Gemini quotes against the original text; Cloudflare findings are accepted only when every quote passes exact evidence verification. Harmless bullet and whitespace formatting differences are allowed. The original quote is retained; paraphrases, missing text, and unsupported fallback quotes are rejected. Older findings without verification metadata are not assumed verified. Provider diagnostics record provider, request phase, duration, and fallback state without logging prompts or document text. A live synthetic check showed the candidate Cloudflare model returning a successful HTTP response without usable finding text, so it remains fallback-only and Gemini remains primary until its output passes validation.
+Both providers propose findings from extracted source text. The application checks Gemini quotes against the original text; Cloudflare findings are accepted only when every quote passes exact evidence verification. Harmless bullet and whitespace formatting differences are allowed. The original quote is retained; paraphrases, missing text, and unsupported Cloudflare quotes are rejected. Older findings without verification metadata are not assumed verified. Provider diagnostics record provider, request phase, duration, and fallback state without logging prompts or document text. Provider attempt metadata records provider, primary/secondary role, outcome, and safe status/category details.
 
 Human review and evidence verification are separate: a finding can be approved by a reviewer while its quotation remains unverified. Review history records the reviewer action and applicable reason or comment.
 

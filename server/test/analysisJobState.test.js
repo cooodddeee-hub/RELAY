@@ -59,15 +59,20 @@ test('demo fallback is exposed only after terminal Gemini and Cloudflare tempora
   assert.equal(publicAnalysisJob(job).demoFallbackAvailable, true);
 });
 
-test('demo fallback accepts complete temporary retry sequences but rejects success or invalid provider order', () => {
+test('demo fallback accepts legacy and current provider order but rejects success or mixed sequences', () => {
   const valid = [
-    { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
-    { provider: 'gemini', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error' },
-    { provider: 'cloudflare', outcome: 'temporary_failure', status: 504, category: 'timeout', errorCode: 'timeout' },
+    { provider: 'cloudflare', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error', role: 'primary' },
+    { provider: 'cloudflare', outcome: 'temporary_failure', status: 503, category: 'http', errorCode: 'http_error', role: 'primary' },
+    { provider: 'gemini', outcome: 'temporary_failure', status: 504, category: 'timeout', errorCode: 'timeout', role: 'secondary' },
   ];
-  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: valid }), true);
-  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: [...valid, { provider: 'cloudflare', outcome: 'success' }] }), false);
-  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: [valid[2], valid[0]] }), false);
+  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'gemini_timeout', lastProviderAttempts: valid }), true);
+  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'gemini_timeout', lastProviderAttempts: [...valid, { provider: 'gemini', outcome: 'success' }] }), false);
+  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'gemini_timeout', lastProviderAttempts: [valid[2], valid[0]] }), false);
+  const legacyOrder = [
+    { provider: 'gemini', outcome: 'temporary_failure' },
+    { provider: 'cloudflare', outcome: 'temporary_failure' },
+  ];
+  assert.equal(isEligibleDemoFallback({ status: 'failed', lastErrorKind: 'cloudflare_timeout', lastProviderAttempts: legacyOrder }), true);
 });
 
 test('provider attempt metadata is sanitized and survives the public job status projection', () => {
