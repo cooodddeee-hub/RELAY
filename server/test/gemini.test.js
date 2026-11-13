@@ -238,10 +238,42 @@ test('Cloudflare primary validates schema, exact evidence, and source associatio
   });
   assert.match(request.url, new RegExp('/ai/run/' + CLOUDFLARE_MODEL.replaceAll('/', '\\/').replaceAll('.', '\\.') + '$'));
   assert.equal(request.options.headers.Authorization, 'Bearer test-token');
+  assert.equal(JSON.parse(request.options.body).max_tokens, 2048);
+  assert.equal(JSON.parse(request.options.body).reasoning_effort, 'low');
+  assert.equal(JSON.parse(request.options.body).temperature, 0);
   assert.equal(result.length, 1);
   assert.equal(result[0].evidence[0].source, source._id);
   assert.equal(result[0].evidence[0].verificationStatus, 'verified');
   assert.equal(result[0].evidence[0].matchedText, source.extractedText);
+});
+
+test('Gemini bounded retries exhaust before Cloudflare fallback failure and preserve all attempts', async () => {
+  let geminiCalls = 0;
+  let cloudflareCalls = 0;
+  const delays = [];
+  const geminiTemporaryFailure = Object.assign(new Error('temporary provider failure'), { status: 503 });
+  await assert.rejects(extractFindings(source, {
+    client: { models: { generateContent: async () => { geminiCalls += 1; throw geminiTemporaryFailure; } } },
+    maxRetries: 1,
+    cloudflareAccountId: 'test-account',
+    cloudflareApiToken: 'test-token',
+    cloudflareMaxRetries: 1,
+    cloudflareFetch: async () => { cloudflareCalls += 1; return { ok: false, status: 503 }; },
+    sleep: async (delay) => delays.push(delay),
+  }), (error) => {
+    assert.equal(error.provider, 'cloudflare');
+    assert.equal(error.retryable, true);
+    assert.deepEqual(error.providerAttempts.map(({ provider, outcome, status }) => ({ provider, outcome, status })), [
+      { provider: 'gemini', outcome: 'temporary_failure', status: 503 },
+      { provider: 'gemini', outcome: 'temporary_failure', status: 503 },
+      { provider: 'cloudflare', outcome: 'temporary_failure', status: 503 },
+      { provider: 'cloudflare', outcome: 'temporary_failure', status: 503 },
+    ]);
+    return true;
+  });
+  assert.equal(geminiCalls, 2);
+  assert.equal(cloudflareCalls, 2);
+  assert.deepEqual(delays, [500, 500]);
 });
 
 test('provider diagnostics report timing and fallback state without source text or credentials', async () => {
@@ -266,6 +298,33 @@ test('provider diagnostics report timing and fallback state without source text 
   assert.equal(serialized.includes(source.extractedText), false);
   assert.equal(serialized.includes('test-token'), false);
   assert.equal(serialized.includes('test-account'), false);
+});
+
+test('provider failure diagnostics include safe error classes, recognized codes, status, and bounded wrapper path', async () => {
+  const diagnostics = [];
+  const originalInfo = console.info;
+  console.info = (line) => diagnostics.push(JSON.parse(line));
+  const cause = Object.assign(new ApiError({ status: 502, message: 'sensitive upstream detail' }), { code: 'ECONNRESET' });
+  try {
+    await assert.rejects(extractFindings(source, {
+      client: clientFrom([Object.assign(new Error('private outer message'), { cause })]),
+      maxRetries: 0,
+      cloudflareAccountId: 'test-account',
+      cloudflareApiToken: 'test-token',
+      cloudflareFetch: async () => { throw new Error('should not fall back for unknown wrapper'); },
+    }));
+  } finally {
+    console.info = originalInfo;
+  }
+  const failedEvent = diagnostics.find((event) => event.operation === 'analysis.providerRequest' && event.phase === 'completed' && event.success === false);
+  assert.equal(failedEvent.errorClass, 'Error');
+  assert.deepEqual(failedEvent.wrapperChain, [
+    { via: 'root', errorClass: 'Error' },
+    { via: 'cause', errorClass: 'ApiError', errorCode: 'ECONNRESET', httpStatus: 502 },
+  ]);
+  assert.equal(JSON.stringify(diagnostics).includes('sensitive upstream detail'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('private outer message'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('test-token'), false);
 });
 
 test('Cloudflare rejects fabricated evidence without falling back to Gemini', async () => {
@@ -496,6 +555,24 @@ test('accepts the OpenAI-compatible Cloudflare choices response envelope', async
   assert.equal(result.length, 1);
   assert.equal(result[0].evidence[0].source, source._id);
   assert.equal(result[0].evidence[0].verificationStatus, 'verified');
+});
+
+test('does not treat truncated reasoning-only Cloudflare output as finding content', async () => {
+  const findings = [{ category: 'Decision', title: 'Ship the beta', description: 'The team chose a June beta launch.', quote: 'The team decided to ship the beta in June.' }];
+  await assert.rejects(extractFindings(source, {
+    primaryProvider: 'cloudflare',
+    cloudflareAccountId: 'test-account',
+    cloudflareApiToken: 'test-token',
+    cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        result: { choices: [{ finish_reason: 'length', message: { content: null, reasoning_content: JSON.stringify({ findings }) } }] },
+      }),
+    }),
+  }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response');
 });
 
 test('Cloudflare findings with unsupported evidence are rejected instead of accepted as unverified', async () => {

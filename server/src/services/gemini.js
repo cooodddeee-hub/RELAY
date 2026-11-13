@@ -48,6 +48,42 @@ function providerStatus(error) {
 
 const timeoutCodes = new Set(['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ERR_SOCKET_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
 const networkCodes = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EAI_AGAIN', 'ENETUNREACH', 'ENETDOWN', 'ENOTFOUND', 'EHOSTUNREACH', 'EHOSTDOWN', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT']);
+const diagnosticErrorClasses = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ApiError', 'APIError', 'GoogleGenAIError', 'APIConnectionError', 'APIConnectionTimeoutError', 'APIUserAbortError', 'AbortError', 'TimeoutError', 'FetchError', 'RequestError']);
+
+function safeErrorClass(error) {
+  const name = typeof error?.name === 'string' ? error.name : error?.constructor?.name;
+  return diagnosticErrorClasses.has(name) ? name : 'OtherError';
+}
+
+function safeErrorCode(error) {
+  if (timeoutCodes.has(error?.code) || networkCodes.has(error?.code)) return error.code;
+  return undefined;
+}
+
+function safeErrorDiagnostics(error) {
+  const pending = [{ value: error, via: 'root' }];
+  const seen = new Set();
+  const wrapperChain = [];
+  const relations = ['cause', 'error', 'originalError', 'response'];
+  while (pending.length && wrapperChain.length < 6) {
+    const { value, via } = pending.shift();
+    if (!value || (typeof value !== 'object' && typeof value !== 'function') || seen.has(value)) continue;
+    seen.add(value);
+    const status = ['providerStatus', 'status', 'statusCode', 'status_code']
+      .map((field) => Number(value[field]))
+      .find((candidate) => Number.isInteger(candidate) && candidate >= 100 && candidate <= 599);
+    wrapperChain.push({
+      via,
+      errorClass: safeErrorClass(value),
+      ...(safeErrorCode(value) ? { errorCode: safeErrorCode(value) } : {}),
+      ...(status === undefined ? {} : { httpStatus: status }),
+    });
+    for (const relation of relations) {
+      try { if (value[relation] && typeof value[relation] === 'object') pending.push({ value: value[relation], via: relation }); } catch {}
+    }
+  }
+  return { errorClass: safeErrorClass(error), wrapperChain };
+}
 
 function isUserCancellation(error) {
   return errorChain(error).some((current) => current.name === 'APIUserAbortError'
@@ -124,10 +160,12 @@ async function measuredRequest(provider, request, fallbackOccurred, options) {
   } catch (error) {
     const attempt = attemptMetadata(provider, error);
     recordProviderAttempt(options, attempt);
+    const safeError = safeErrorDiagnostics(error);
     providerDiagnostic(provider, 'completed', {
       durationMs: Date.now() - startedAt,
       success: false,
       fallbackOccurred,
+      ...safeError,
       failureCategory: attempt.category,
       errorCode: attempt.errorCode,
       outcome: attempt.outcome,
@@ -272,7 +310,12 @@ async function requestCloudflare(source, prompt, options, fallbackOccurred) {
             {
               method: 'POST',
               headers: { Authorization: 'Bearer ' + apiToken, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ messages: [{ role: 'user', content: prompt }] }),
+              body: JSON.stringify({
+                messages: [{ role: 'user', content: prompt }],
+                max_tokens: 2048,
+                reasoning_effort: 'low',
+                temperature: 0,
+              }),
               signal: AbortSignal.timeout(timeoutMs),
             },
           );
