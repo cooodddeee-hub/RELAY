@@ -19,7 +19,7 @@ function getSupabaseBrowserClient() {
   return supabaseBrowser;
 }
 const TOKEN_KEY = 'relayToken';
-const state = { mode: 'real', token: localStorage.getItem(TOKEN_KEY), user: null, projects: [], selectedProjectId: '', sources: [], findings: [], handovers: [], selectedHandoverId: '', handoverError: '', handoverActionError: '', handoverLoading: false, handoverBusy: false, handoverDownloading: false, analysisJob: null, analysisJobError: '', analysisStarting: false, analysisAdvancing: false, errors: { projects: '', sources: '', findings: '' }, authMode: 'login', busy: false, reviewBusy: false, reviewFilter: 'all', sourceUploadBusy: false };
+const state = { mode: 'real', token: localStorage.getItem(TOKEN_KEY), user: null, projects: [], selectedProjectId: '', sources: [], findings: [], handovers: [], selectedHandoverId: '', handoverError: '', handoverActionError: '', handoverLoading: false, handoverBusy: false, handoverDownloading: false, analysisJob: null, analysisJobError: '', analysisJobDiagnostic: null, analysisStarting: false, analysisAdvancing: false, errors: { projects: '', sources: '', findings: '' }, authMode: 'login', busy: false, reviewBusy: false, reviewFilter: 'all', sourceUploadBusy: false };
 let authGeneration = 0;
 let handoverRequest = 0;
 const analysisRunners = new Map();
@@ -66,8 +66,12 @@ async function api(path, options = {}) {
   if (state.mode === 'demo') throw new Error('Demo mode does not send requests to the RELAY API.');
   const method = (options.method || 'GET').toUpperCase();
   const traceAnalysisAdvance = method === 'POST' && /^\/analysis-jobs\/[^/]+\/advance$/.test(path);
+  const diagnosticPath = '/api/analysis-jobs/:jobId/advance';
   const diagnostic = (status, errorType) => {
-    if (traceAnalysisAdvance) console.info('[RELAY ANALYSIS REQUEST]', { method, path, status, errorType });
+    if (!traceAnalysisAdvance) return null;
+    const details = { method, path: diagnosticPath, status: status ?? 'No HTTP response', errorType };
+    console.info('[RELAY ANALYSIS REQUEST]', details);
+    return details;
   };
   const headers = new Headers(options.headers || {});
   if (state.token) headers.set('Authorization', `Bearer ${state.token}`);
@@ -75,17 +79,19 @@ async function api(path, options = {}) {
   let response;
   try { response = await fetch(`${API_URL}${path}`, { ...options, headers }); }
   catch (error) {
-    diagnostic(null, error instanceof TypeError ? 'TypeError' : 'FetchError');
-    throw new Error('Cannot reach the RELAY API. Check that the backend is running.');
+    const requestError = new Error('Cannot reach the RELAY API. Check that the backend is running.');
+    requestError.diagnostic = diagnostic(null, error instanceof TypeError ? 'TypeError' : 'FetchError');
+    throw requestError;
   }
   let data = {};
   try { data = await response.json(); }
   catch { diagnostic(response.status, 'InvalidJSON'); }
   if (!response.ok) {
-    diagnostic(response.status, 'HTTPError');
+    const requestDiagnostic = diagnostic(response.status, 'HTTPError');
     if (response.status === 401 && state.token) expireSession();
     const error = new Error(data.message || `Request failed (${response.status})`);
     error.status = response.status;
+    error.diagnostic = requestDiagnostic;
     throw error;
   }
   diagnostic(response.status, 'none');
@@ -855,6 +861,16 @@ function renderAnalysisJob() {
     panel.classList.remove('hidden');
     panel.className = 'rounded-3xl border border-rose-300/20 bg-rose-500/[0.06] p-5 sm:p-7';
     panel.append(node('p', `Could not load analysis status: ${state.analysisJobError}`, 'text-sm text-rose-200'));
+    if (state.analysisJobDiagnostic) {
+      const diagnostic = state.analysisJobDiagnostic;
+      const details = node('div', undefined, 'mt-4 rounded-xl border border-rose-200/10 bg-black/10 p-3 text-xs text-rose-100/70');
+      details.append(node('p', 'TEMPORARY REQUEST DIAGNOSTIC', 'mb-2 font-semibold tracking-wide text-rose-100/80'));
+      details.append(node('p', `Method: ${diagnostic.method}`));
+      details.append(node('p', `Endpoint: ${diagnostic.path}`));
+      details.append(node('p', `HTTP status: ${diagnostic.status}`));
+      details.append(node('p', `Error type: ${diagnostic.errorType}`));
+      panel.append(details);
+    }
     return;
   }
   if (!active) { if (analysisElapsedTimer) { window.clearInterval(analysisElapsedTimer); analysisElapsedTimer = null; } return; }
@@ -992,6 +1008,7 @@ function runAnalysisJob(jobId) {
           if (String(state.selectedProjectId) === runProjectId) {
             state.analysisJob = result.job;
             state.analysisJobError = '';
+            state.analysisJobDiagnostic = null;
             renderAnalysisJob();
           }
         } catch (error) {
@@ -1007,7 +1024,7 @@ function runAnalysisJob(jobId) {
         await loadProjectData();
       }
     } catch (error) {
-      if (String(state.selectedProjectId) === runProjectId) { state.analysisJobError = error.message; renderAnalysisJob(); }
+      if (String(state.selectedProjectId) === runProjectId) { state.analysisJobError = error.message; state.analysisJobDiagnostic = error.diagnostic || null; renderAnalysisJob(); }
     } finally {
       analysisRunners.delete(jobId);
       state.analysisAdvancing = analysisRunners.size > 0;
