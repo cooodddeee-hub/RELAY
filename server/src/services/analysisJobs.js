@@ -4,15 +4,18 @@ import AnalysisJob from '../models/AnalysisJob.js';
 import Finding from '../models/Finding.js';
 import Project from '../models/Project.js';
 import Source from '../models/Source.js';
+import SourceRevision from '../models/SourceRevision.js';
+import { claimActiveProjectWrite } from './projectLifecycle.js';
 import { extractFindings, GeminiAnalysisError } from './gemini.js';
-import { analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, analysisRetryUpdate, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction, safeProviderAttempts } from './analysisJobState.js';
+import { analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, analysisRetryUpdate, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction, safeProviderAttempts, safeValidationDiagnostic } from './analysisJobState.js';
 
 export const ANALYSIS_STEP_BUDGET_MS = 240_000;
 export const ANALYSIS_LEASE_MS = 330_000;
+export const ANALYSIS_SOURCE_TEXT_LIMIT = 45_000;
 const MAX_JOB_ATTEMPTS_PER_SOURCE = 3;
 
 export class AnalysisJobError extends Error {
-  constructor(message, status = 400) { super(message); this.name = 'AnalysisJobError'; this.status = status; }
+  constructor(message, status = 400, code) { super(message); this.name = 'AnalysisJobError'; this.status = status; if (code) this.code = code; }
 }
 
 async function withTransaction(work) {
@@ -32,13 +35,29 @@ export async function getProjectAnalysisJob(projectId) {
 
 export async function getAnalysisJob(jobId) { return AnalysisJob.findById(jobId).select('+leaseExpiresAt'); }
 
-export async function createOrGetAnalysisJob({ projectId, actorId }) {
+export async function createOrGetAnalysisJob({ projectId, actorId, sourceIds }) {
+  let selectedSourceIds;
+  if (sourceIds !== undefined) {
+    if (!Array.isArray(sourceIds) || sourceIds.length < 1 || sourceIds.length > 500
+      || sourceIds.some((sourceId) => !mongoose.isValidObjectId(sourceId))) {
+      throw new AnalysisJobError('Select between 1 and 500 valid project sources for analysis.', 400);
+    }
+    selectedSourceIds = [...new Set(sourceIds.map(String))];
+  }
   const jobId = new mongoose.Types.ObjectId();
   let result = null;
   try {
     await withTransaction(async (session) => {
       const project = await Project.findById(projectId).select('+activeAnalysisJob').session(session);
       if (!project) throw new AnalysisJobError('Project not found.', 404);
+      if (selectedSourceIds) {
+        const availableCount = await Source.countDocuments({
+          project: projectId, status: 'processed', _id: { $in: selectedSourceIds },
+        }).session(session);
+        if (availableCount !== selectedSourceIds.length) {
+          throw new AnalysisJobError('One or more selected sources are unavailable in this project.', 404);
+        }
+      }
       const active = await reuseActiveAnalysisJob(
         project,
         (id) => AnalysisJob.findById(id).select('+leaseExpiresAt').session(session),
@@ -46,16 +65,48 @@ export async function createOrGetAnalysisJob({ projectId, actorId }) {
       );
       if (active) { result = active; return; }
 
-      const sources = await Source.find({ project: projectId, status: 'processed' })
-        .select('+analysisCompletedAt').sort({ createdAt: 1, _id: 1 }).session(session);
-      const pending = sources.filter((source) => !source.analysisCompletedAt);
+      const sources = await Source.find({ project: projectId, status: 'processed', ...(selectedSourceIds ? { _id: { $in: selectedSourceIds } } : {}) })
+        .select('+analysisCompletedAt +analyzedRevision').sort({ createdAt: 1, _id: 1 }).session(session);
+      if (selectedSourceIds && sources.length !== selectedSourceIds.length) {
+        throw new AnalysisJobError('One or more selected sources are unavailable in this project.', 404);
+      }
+      const currentRevisionIds = sources.filter((source) => source.provider === 'github' && source.currentRevision)
+        .map((source) => source.currentRevision);
+      const currentRevisions = await SourceRevision.find({ _id: { $in: currentRevisionIds } })
+        .select('_id source revisionKey capturedAt').session(session);
+      const revisionsById = new Map(currentRevisions.map((revision) => [String(revision._id), revision]));
+      const pending = [];
+      for (const source of sources) {
+        if (source.provider !== 'github') {
+          if (!source.analysisCompletedAt) pending.push(source);
+          continue;
+        }
+        if (!source.currentRevision) continue;
+        const revision = revisionsById.get(String(source.currentRevision));
+        if (!revision || String(revision.source) !== String(source._id)) {
+          throw new AnalysisJobError('A selected GitHub source revision is unavailable.', 409);
+        }
+        const alreadyAnalyzed = String(source.currentRevision) === String(source.analyzedRevision || '')
+          || (!source.analyzedRevision && source.analysisCompletedAt
+            && revision.capturedAt && revision.capturedAt <= source.analysisCompletedAt);
+        if (!alreadyAnalyzed) pending.push(source);
+      }
       if (!pending.length) { result = null; return; }
+
+      const sourceRevisionSnapshots = [];
+      for (const source of pending) {
+        if (source.provider !== 'github') continue;
+        const revision = revisionsById.get(String(source.currentRevision));
+        if (!revision) throw new AnalysisJobError('A selected GitHub source revision is unavailable.', 409);
+        sourceRevisionSnapshots.push({ source: source._id, revision: revision._id, revisionKey: revision.revisionKey });
+      }
 
       const job = new AnalysisJob({
         _id: jobId,
         project: projectId,
         createdBy: actorId,
         sourceIds: pending.map((source) => source._id),
+        ...(sourceRevisionSnapshots.length ? { sourceRevisionSnapshots } : {}),
         nextSourceIndex: 0,
         completedSourceCount: 0,
         status: 'queued',
@@ -123,13 +174,27 @@ async function commitSourceStep({ jobId, token, sourceId, findings, providerAtte
   return withTransaction(async (session) => {
     const job = await AnalysisJob.findOne({ _id: jobId, leaseToken: token }).select('+leaseToken').session(session);
     if (!job) throw new AnalysisJobError('Analysis step lease expired before its checkpoint.', 409);
+    const project = await Project.findById(job.project).session(session);
+    if (!project || (project.deletionState && project.deletionState !== 'active')) {
+      throw new AnalysisJobError('Project deletion has started; analysis results were not saved.', 410, 'PROJECT_DELETION_IN_PROGRESS');
+    }
+    await claimActiveProjectWrite(job.project, session);
     const source = await Source.findOne({ _id: sourceId, project: job.project }).select('+analysisCompletedAt').session(session);
     if (!source) throw new AnalysisJobError('The source for this analysis step no longer exists.', 404);
 
-    if (!source.analysisCompletedAt) {
+    const pinned = (job.sourceRevisionSnapshots || []).find((item) => String(item.source) === String(sourceId));
+    let revision;
+    if (pinned) {
+      revision = await SourceRevision.findOne({ _id: pinned.revision, source: source._id }).session(session);
+      if (!revision || revision.revisionKey !== pinned.revisionKey) {
+        throw new AnalysisJobError('The pinned GitHub source revision is unavailable or does not match this source.', 500, 'ANALYSIS_REVISION_UNAVAILABLE');
+      }
+    }
+
+    if (pinned || !source.analysisCompletedAt) {
       for (const item of findings) {
-        const key = analysisFindingKey(job.project, source._id, item.title);
-        const legacy = await Finding.findOne({ project: job.project, 'evidence.source': source._id, title: item.title }).session(session);
+        const key = analysisFindingKey(job.project, source._id, item.title, pinned?.revisionKey);
+        const legacy = pinned ? null : await Finding.findOne({ project: job.project, 'evidence.source': source._id, title: item.title }).session(session);
         if (legacy) {
           if (!legacy.analysisKey) {
             const existingKey = await Finding.findOne({ analysisKey: key }).select('_id').session(session);
@@ -137,13 +202,22 @@ async function commitSourceStep({ jobId, token, sourceId, findings, providerAtte
           }
           continue;
         }
+        const revisionEvidence = pinned ? {
+          ...item,
+          evidence: (item.evidence || []).map((evidence) => ({
+            ...evidence,
+            sourceRevision: revision._id,
+            ...(revision.locator ? { locator: revision.locator } : {}),
+          })),
+        } : item;
         await Finding.findOneAndUpdate(
           { analysisKey: key },
-          { $setOnInsert: { project: job.project, analysisKey: key, ...item, status: 'pending' } },
+          { $setOnInsert: { project: job.project, analysisKey: key, ...revisionEvidence, status: 'pending' } },
           { upsert: true, new: true, setDefaultsOnInsert: true, session },
         );
       }
       source.analysisCompletedAt = new Date();
+      if (pinned) source.analyzedRevision = revision._id;
       await source.save({ session });
     }
 
@@ -164,7 +238,7 @@ async function commitSourceStep({ jobId, token, sourceId, findings, providerAtte
           lastProviderAttempts: safeProviderAttempts(providerAttempts),
           ...(completedAt ? { completedAt } : {}),
         },
-        $unset: { retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, leaseToken: 1, leaseExpiresAt: 1 },
+        $unset: { retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, lastValidationFailure: 1, leaseToken: 1, leaseExpiresAt: 1 },
       },
       { session },
     );
@@ -197,6 +271,7 @@ async function recordStepFailure(job, token, error, now = new Date(), providerAt
       lastErrorKind: analysisFailureCode(error),
       ...(Number.isInteger(error?.status) ? { lastErrorStatus: error.status } : {}),
       lastProviderAttempts: safeProviderAttempts(providerAttempts),
+      ...(safeValidationDiagnostic(error?.validationDiagnostic) ? { lastValidationFailure: safeValidationDiagnostic(error.validationDiagnostic) } : {}),
       currentSource: job.sourceIds[job.nextSourceIndex],
       lastProgressAt: now,
     },
@@ -218,9 +293,34 @@ export async function advanceAnalysisJob(jobId, { now = () => new Date(), analyz
   const { job, token, sourceId } = claim;
   let providerAttempts = [];
   try {
-    const source = await Source.findOne({ _id: sourceId, project: job.project, status: 'processed' });
+    const source = await Source.findOne({ _id: sourceId, project: job.project, status: 'processed' })
+      .select('+analysisCompletedAt +analyzedRevision');
     if (!source) throw new AnalysisJobError('The source for this analysis step is unavailable.', 404);
-    const findings = await analyze(source);
+    const pinned = (job.sourceRevisionSnapshots || []).find((item) => String(item.source) === String(sourceId));
+    let revision;
+    if (pinned) {
+      revision = await SourceRevision.findOne({ _id: pinned.revision, source: source._id });
+      if (!revision || revision.revisionKey !== pinned.revisionKey) {
+        throw new AnalysisJobError('The pinned GitHub source revision is unavailable or does not match this source.', 500, 'ANALYSIS_REVISION_UNAVAILABLE');
+      }
+      source.extractedText = revision.textSnapshot;
+      source._analysisRevisionId = revision._id;
+      source._analysisRevisionKey = revision.revisionKey;
+      source._analysisRevisionLocator = revision.locator;
+    }
+    // The prompt has always been limited to 45,000 characters. Verify evidence
+    // against the same bounded text the model saw, not the uncapped source.
+    source.extractedText = String(source.extractedText || '').slice(0, ANALYSIS_SOURCE_TEXT_LIMIT);
+    const sourceType = source.provider === 'github'
+      ? (['readme', 'commit', 'issue'].includes(source.externalType) ? source.externalType : 'github_other')
+      : 'upload';
+    const findings = await analyze(source, {
+      diagnosticContext: {
+        sourceId: String(source._id),
+        sourceType,
+        sourcePosition: job.nextSourceIndex + 1,
+      },
+    });
     providerAttempts = findings?.providerAttempts || [];
     if (Date.now() - startedAt >= ANALYSIS_STEP_BUDGET_MS) {
       const budgetError = new Error('Analysis step exceeded its safe processing budget.');
@@ -230,7 +330,7 @@ export async function advanceAnalysisJob(jobId, { now = () => new Date(), analyz
     await AnalysisJob.updateOne({ _id: job._id, leaseToken: token }, { $set: { stage: 'saving_findings', lastProgressAt: now() } });
     return await commitSourceStep({ jobId, token, sourceId, findings, providerAttempts: findings?.providerAttempts });
   } catch (error) {
-    if (error instanceof AnalysisJobError && error.status === 409) throw error;
+    if (error instanceof AnalysisJobError && [409, 410].includes(error.status)) throw error;
     return recordStepFailure(job, token, error, now(), providerAttempts.length ? providerAttempts : error?.providerAttempts);
   }
 }

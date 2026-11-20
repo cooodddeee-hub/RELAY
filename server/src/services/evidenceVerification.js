@@ -36,11 +36,37 @@ function normalizeForMatch(value) {
   return { text: characters.join(''), offsets };
 }
 
+function hasNormalizedSubstring(sourceText, quote) {
+  const normalizedSource = normalizeForMatch(sourceText).text;
+  const normalizedQuote = normalizeForMatch(quote).text;
+  return Boolean(normalizedQuote) && normalizedSource.includes(normalizedQuote);
+}
+
+/**
+ * Return informational mismatch flags only. These comparisons never authorize
+ * evidence; verifyEvidenceQuote remains the sole source of verification status.
+ */
+export function diagnoseEvidenceQuoteMismatch({ sourceText, quote }) {
+  const text = typeof sourceText === 'string' ? sourceText : '';
+  const candidate = typeof quote === 'string' ? quote : '';
+  const exactQuoteMatch = hasNormalizedSubstring(text, candidate);
+  const caseOnlyMatch = !exactQuoteMatch
+    && hasNormalizedSubstring(text.toLowerCase(), candidate.toLowerCase());
+  const stripPunctuation = (value) => [...value].filter((character) => !/\p{P}/u.test(character)).join('');
+  const punctuationOnlyMatch = !exactQuoteMatch
+    && hasNormalizedSubstring(stripPunctuation(text), stripPunctuation(candidate));
+  const unicodeNormalizationMatch = !exactQuoteMatch
+    && hasNormalizedSubstring(text.normalize('NFC'), candidate.normalize('NFC'));
+  return { exactQuoteMatch, caseOnlyMatch, punctuationOnlyMatch, unicodeNormalizationMatch };
+}
+
 /** Verify quotes with source offsets measured in original UTF-16 string units. */
-export function verifyEvidenceQuote({ sourceId, sourceName, sourceText, quote, section = '' }) {
+export function verifyEvidenceQuote({ sourceId, sourceName, sourceText, quote, section = '', sourceRevision, locator }) {
   const originalQuote = typeof quote === 'string' ? quote : '';
   const evidence = {
     source: sourceId,
+    ...(sourceRevision ? { sourceRevision } : {}),
+    ...(locator ? { locator } : {}),
     sourceName,
     quote: originalQuote,
     section: typeof section === 'string' ? section : '',

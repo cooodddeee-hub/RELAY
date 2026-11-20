@@ -1,13 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import mongoose from 'mongoose';
 import { canEditProject, canReadProject } from './projectPermissions.js';
 import { extractTextFromBuffer } from './documentText.js';
 import { getSupabaseStorage } from './supabaseStorage.js';
 import Source from '../models/Source.js';
+import { claimActiveProjectWrite } from './projectLifecycle.js';
 
 export const MAX_SOURCE_SIZE = 15 * 1024 * 1024;
 export const SIGNED_DOWNLOAD_TTL_SECONDS = 5 * 60;
 export const UPLOAD_INTENT_TTL_MS = 2 * 60 * 60 * 1000;
+
+async function projectWriteTransaction(work) {
+  const session = await mongoose.startSession();
+  try { return await session.withTransaction(() => work(session)); }
+  finally { await session.endSession(); }
+}
 
 const MIME_TYPES_BY_EXTENSION = {
   '.pdf': new Set(['application/pdf', 'application/x-pdf', 'application/octet-stream']),
@@ -56,7 +64,7 @@ function storageFailure(message, status = 502) {
   return new SourceWorkflowError(message, status);
 }
 
-export async function createSourceUploadIntent({ project, user, metadata, SourceModel = Source, storageConfig, uuid = randomUUID, now = Date.now }) {
+export async function createSourceUploadIntent({ project, user, metadata, SourceModel = Source, storageConfig, uuid = randomUUID, now = Date.now, withProjectTransaction = projectWriteTransaction, claimProjectWrite = claimActiveProjectWrite }) {
   assertSourceEditAccess(project, user?._id);
   const file = validateSourceUpload(metadata);
   const configured = storageConfig || getSupabaseStorage();
@@ -73,22 +81,28 @@ export async function createSourceUploadIntent({ project, user, metadata, Source
 
   let source;
   try {
-    source = await SourceModel.create({
-      project: project._id,
-      originalName: file.originalName,
-      mimeType: file.mimeType,
-      size: file.size,
-      storageProvider: 'supabase',
-      storageBucket: bucketName,
-      storageKey,
-      storagePath: undefined,
-      uploadStatus: 'pending',
-      uploadIntentExpiresAt: new Date(now() + UPLOAD_INTENT_TTL_MS),
-      status: 'uploaded',
-      extractedText: '',
-      uploadedBy: user._id,
+    source = await withProjectTransaction(async (session) => {
+      await claimProjectWrite(project._id, session);
+      const document = {
+        project: project._id,
+        originalName: file.originalName,
+        mimeType: file.mimeType,
+        size: file.size,
+        storageProvider: 'supabase',
+        storageBucket: bucketName,
+        storageKey,
+        storagePath: undefined,
+        uploadStatus: 'pending',
+        uploadIntentExpiresAt: new Date(now() + UPLOAD_INTENT_TTL_MS),
+        status: 'uploaded',
+        extractedText: '',
+        uploadedBy: user._id,
+      };
+      if (session) return (await SourceModel.create([document], { session }))[0];
+      return SourceModel.create(document);
     });
-  } catch {
+  } catch (error) {
+    if (error?.code === 'PROJECT_DELETION_IN_PROGRESS') throw new SourceWorkflowError('Project deletion has started; the upload request was not saved.', 410);
     throw storageFailure('Could not save the source upload request.', 500);
   }
 
@@ -97,14 +111,19 @@ export async function createSourceUploadIntent({ project, user, metadata, Source
   return { source, uploadUrl: signed.data.signedUrl };
 }
 
-async function markCompletionFailed(source, errorMessage = 'Document processing failed.') {
-  source.uploadStatus = 'failed';
-  source.status = 'failed';
-  source.error = errorMessage;
-  await source.save().catch(() => {});
+async function markCompletionFailed(source, errorMessage = 'Document processing failed.', { withProjectTransaction = projectWriteTransaction, claimProjectWrite = claimActiveProjectWrite } = {}) {
+  try {
+    await withProjectTransaction(async (session) => {
+      await claimProjectWrite(source.project, session);
+      source.uploadStatus = 'failed';
+      source.status = 'failed';
+      source.error = errorMessage;
+      await source.save({ session });
+    });
+  } catch {}
 }
 
-export async function completeSourceUpload({ source, project, userId, SourceModel = Source, storageConfig, extract = extractTextFromBuffer, now = Date.now }) {
+export async function completeSourceUpload({ source, project, userId, SourceModel = Source, storageConfig, extract = extractTextFromBuffer, now = Date.now, withProjectTransaction = projectWriteTransaction, claimProjectWrite = claimActiveProjectWrite }) {
   assertSourceEditAccess(project, userId);
   if (!source || source.storageProvider !== 'supabase' || !source.storageKey || !source.storageBucket) {
     throw new SourceWorkflowError('Source upload intent not found.', 404);
@@ -158,11 +177,15 @@ export async function completeSourceUpload({ source, project, userId, SourceMode
     claimed.uploadStatus = 'completed';
     claimed.error = '';
     claimed.uploadIntentExpiresAt = undefined;
-    await claimed.save();
+    await withProjectTransaction(async (session) => {
+      await claimProjectWrite(claimed.project, session);
+      await claimed.save(session ? { session } : {});
+    });
     return { source: claimed, alreadyCompleted: false };
   } catch (error) {
+    if (error?.code === 'PROJECT_DELETION_IN_PROGRESS') throw new SourceWorkflowError('Project deletion has started; the upload was not completed.', 410);
     const publicMessage = error instanceof SourceWorkflowError ? error.message : 'Document text extraction failed.';
-    await markCompletionFailed(claimed, publicMessage);
+    await markCompletionFailed(claimed, publicMessage, { withProjectTransaction, claimProjectWrite });
     if (error instanceof SourceWorkflowError) throw error;
     throw storageFailure(publicMessage, 422);
   }

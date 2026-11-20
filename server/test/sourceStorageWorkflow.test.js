@@ -18,6 +18,7 @@ const viewerId = 'viewer-1';
 const project = { _id: 'project-1', owner: ownerId, members: [{ user: viewerId, role: 'viewer' }] };
 const owner = { _id: ownerId };
 const file = { originalName: 'handover.txt', mimeType: 'text/plain', size: 15 };
+const isolatedProjectWrite = { withProjectTransaction: async (work) => work(null), claimProjectWrite: async () => {} };
 
 function makeSourceModel() {
   const records = new Map();
@@ -78,7 +79,7 @@ test('upload intent requires an owner/editor and validates extension, MIME type,
   const SourceModel = makeSourceModel();
   const storageConfig = makeStorage();
   await assert.rejects(
-    createSourceUploadIntent({ project, user: { _id: viewerId }, metadata: file, SourceModel, storageConfig }),
+    createSourceUploadIntent({ project, user: { _id: viewerId }, metadata: file, SourceModel, storageConfig, ...isolatedProjectWrite }),
     (error) => error instanceof SourceWorkflowError && error.status === 403,
   );
   assert.equal(storageConfig.bucket.calls.uploadSign.length, 0);
@@ -95,7 +96,7 @@ test('owner upload intent persists an unpredictable object key and only returns 
   const SourceModel = makeSourceModel();
   const storageConfig = makeStorage();
   const result = await createSourceUploadIntent({
-    project, user: owner, metadata: file, SourceModel, storageConfig, uuid: () => 'random-object-id', now: () => 1000,
+    project, user: owner, metadata: file, SourceModel, storageConfig, uuid: () => 'random-object-id', now: () => 1000, ...isolatedProjectWrite,
   });
   assert.equal(result.source.storageProvider, 'supabase');
   assert.equal(result.source.storageBucket, 'relay-files');
@@ -123,11 +124,11 @@ test('Supabase configuration fails safely without returning any configured value
 test('completion verifies project role, uploader identity, object size, and extracts from the stored buffer', async () => {
   const SourceModel = makeSourceModel();
   const storageConfig = makeStorage({ bytes: Buffer.from('a verified document') });
-  const { source } = await createSourceUploadIntent({ project, user: owner, metadata: { ...file, size: Buffer.byteLength('a verified document') }, SourceModel, storageConfig, uuid: () => 'completed-source' });
+  const { source } = await createSourceUploadIntent({ project, user: owner, metadata: { ...file, size: Buffer.byteLength('a verified document') }, SourceModel, storageConfig, uuid: () => 'completed-source', ...isolatedProjectWrite });
   let extracted;
   const result = await completeSourceUpload({
     source, project, userId: ownerId, SourceModel, storageConfig,
-    extract: async (buffer, name) => { extracted = { buffer: buffer.toString(), name }; return 'extracted source text'; },
+    extract: async (buffer, name) => { extracted = { buffer: buffer.toString(), name }; return 'extracted source text'; }, ...isolatedProjectWrite,
   });
   assert.equal(result.alreadyCompleted, false);
   assert.equal(result.source.status, 'processed');
@@ -138,11 +139,11 @@ test('completion verifies project role, uploader identity, object size, and extr
   assert.equal(storageConfig.bucket.calls.download.length, 1);
 
   await assert.rejects(
-    completeSourceUpload({ source: result.source, project, userId: viewerId, SourceModel, storageConfig }),
+    completeSourceUpload({ source: result.source, project, userId: viewerId, SourceModel, storageConfig, ...isolatedProjectWrite }),
     (error) => error instanceof SourceWorkflowError && error.status === 403,
   );
   await assert.rejects(
-    completeSourceUpload({ source: result.source, project, userId: 'other-user', SourceModel, storageConfig }),
+    completeSourceUpload({ source: result.source, project, userId: 'other-user', SourceModel, storageConfig, ...isolatedProjectWrite }),
     (error) => error instanceof SourceWorkflowError && error.status === 403,
   );
 });
@@ -151,24 +152,24 @@ test('missing, oversized, or mismatched objects fail verification without proces
   const SourceModel = makeSourceModel();
   const metadata = { ...file, size: Buffer.byteLength('hello from source') };
   const missingConfig = makeStorage({ failInfo: true });
-  const missingIntent = await createSourceUploadIntent({ project, user: owner, metadata, SourceModel, storageConfig: missingConfig, uuid: () => 'missing' });
-  await assert.rejects(completeSourceUpload({ source: missingIntent.source, project, userId: ownerId, SourceModel, storageConfig: missingConfig }), (error) => error.status === 400);
+  const missingIntent = await createSourceUploadIntent({ project, user: owner, metadata, SourceModel, storageConfig: missingConfig, uuid: () => 'missing', ...isolatedProjectWrite });
+  await assert.rejects(completeSourceUpload({ source: missingIntent.source, project, userId: ownerId, SourceModel, storageConfig: missingConfig, ...isolatedProjectWrite }), (error) => error.status === 400);
   assert.equal(missingIntent.source.uploadStatus, 'failed');
 
   const sizeConfig = makeStorage({ actualSize: MAX_SOURCE_SIZE + 1 });
-  const sizeIntent = await createSourceUploadIntent({ project, user: owner, metadata, SourceModel, storageConfig: sizeConfig, uuid: () => 'oversized' });
-  await assert.rejects(completeSourceUpload({ source: sizeIntent.source, project, userId: ownerId, SourceModel, storageConfig: sizeConfig }), /size does not match/);
+  const sizeIntent = await createSourceUploadIntent({ project, user: owner, metadata, SourceModel, storageConfig: sizeConfig, uuid: () => 'oversized', ...isolatedProjectWrite });
+  await assert.rejects(completeSourceUpload({ source: sizeIntent.source, project, userId: ownerId, SourceModel, storageConfig: sizeConfig, ...isolatedProjectWrite }), /size does not match/);
   assert.equal(sizeConfig.bucket.calls.download.length, 0);
 });
 
 test('duplicate completion is idempotent and does not download or extract twice', async () => {
   const SourceModel = makeSourceModel();
   const storageConfig = makeStorage();
-  const { source } = await createSourceUploadIntent({ project, user: owner, metadata: { ...file, size: Buffer.byteLength('hello from source') }, SourceModel, storageConfig, uuid: () => 'duplicate' });
+  const { source } = await createSourceUploadIntent({ project, user: owner, metadata: { ...file, size: Buffer.byteLength('hello from source') }, SourceModel, storageConfig, uuid: () => 'duplicate', ...isolatedProjectWrite });
   let extractionCount = 0;
   const extract = async () => { extractionCount += 1; return 'text'; };
-  const first = await completeSourceUpload({ source, project, userId: ownerId, SourceModel, storageConfig, extract });
-  const second = await completeSourceUpload({ source: first.source, project, userId: ownerId, SourceModel, storageConfig, extract });
+  const first = await completeSourceUpload({ source, project, userId: ownerId, SourceModel, storageConfig, extract, ...isolatedProjectWrite });
+  const second = await completeSourceUpload({ source: first.source, project, userId: ownerId, SourceModel, storageConfig, extract, ...isolatedProjectWrite });
   assert.equal(first.alreadyCompleted, false);
   assert.equal(second.alreadyCompleted, true);
   assert.equal(extractionCount, 1);
@@ -178,14 +179,14 @@ test('duplicate completion is idempotent and does not download or extract twice'
 test('extraction failures retain the object metadata and permit a safe completion retry', async () => {
   const SourceModel = makeSourceModel();
   const storageConfig = makeStorage();
-  const { source } = await createSourceUploadIntent({ project, user: owner, metadata: { ...file, size: Buffer.byteLength('hello from source') }, SourceModel, storageConfig, uuid: () => 'retry' });
-  await assert.rejects(completeSourceUpload({ source, project, userId: ownerId, SourceModel, storageConfig, extract: async () => { throw new Error('private parser detail'); } }), /Document text extraction failed/);
+  const { source } = await createSourceUploadIntent({ project, user: owner, metadata: { ...file, size: Buffer.byteLength('hello from source') }, SourceModel, storageConfig, uuid: () => 'retry', ...isolatedProjectWrite });
+  await assert.rejects(completeSourceUpload({ source, project, userId: ownerId, SourceModel, storageConfig, extract: async () => { throw new Error('private parser detail'); }, ...isolatedProjectWrite }), /Document text extraction failed/);
   assert.equal(source.uploadStatus, 'failed');
   assert.equal(source.status, 'failed');
   assert.equal(source.storageKey, 'project-1/retry.txt');
   assert.doesNotMatch(source.error, /private parser detail/);
 
-  const retry = await completeSourceUpload({ source, project, userId: ownerId, SourceModel, storageConfig, extract: async () => 'recovered text' });
+  const retry = await completeSourceUpload({ source, project, userId: ownerId, SourceModel, storageConfig, extract: async () => 'recovered text', ...isolatedProjectWrite });
   assert.equal(retry.source.uploadStatus, 'completed');
   assert.equal(retry.source.extractedText, 'recovered text');
 });
@@ -202,7 +203,7 @@ test('verified source download uses a short-lived signed URL and original filena
 
 test('source authorization allows viewers to read but not edit', () => {
   assert.doesNotThrow(() => assertSourceReadAccess(project, viewerId));
-  return assert.rejects(createSourceUploadIntent({ project, user: { _id: viewerId }, metadata: file }), /Only project owners and editors/);
+  return assert.rejects(createSourceUploadIntent({ project, user: { _id: viewerId }, metadata: file, ...isolatedProjectWrite }), /Only project owners and editors/);
 });
 
 test('Supabase deletion failures retain the source record and report the failure', async () => {

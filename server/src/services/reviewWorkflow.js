@@ -96,14 +96,18 @@ export function buildReviewChange(finding, actorId, action, payload = {}, now = 
  * Run the same review transition against a transactional repository. The
  * injected adapter keeps state rules testable without writing to a real DB.
  */
-export async function runReviewAction({ findingId, projectId, actorId, action, payload, transaction }) {
+export async function runReviewAction({ findingId, projectId, actorId, action, payload, transaction, authorizeReview }) {
   return transaction(async (repository) => {
     const finding = await repository.findFinding(findingId, projectId);
     if (!finding) throw new ReviewWorkflowError('Finding not found.', 404);
+    if (authorizeReview) await authorizeReview({ finding, repository, action, payload });
     const change = buildReviewChange(finding, actorId, action, payload);
     Object.assign(finding, change.findingUpdates);
     await repository.saveFinding(finding);
     await repository.appendHistory({ finding: findingId, project: projectId, reviewer: actorId, ...change.history });
+    if (repository.appendAuditEvent) {
+      await repository.appendAuditEvent({ finding, projectId, actorId, change });
+    }
     return finding;
   });
 }

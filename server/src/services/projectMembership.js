@@ -3,7 +3,12 @@ export class ProjectMembershipError extends Error {
 }
 
 export function visibleProjectsFilter(userId) {
-  return { $or: [{ owner: userId }, { 'members.user': userId }] };
+  return {
+    $and: [
+      { $or: [{ owner: userId }, { 'members.user': userId }] },
+      { $or: [{ deletionState: 'active' }, { deletionState: { $exists: false } }, { owner: userId }] },
+    ],
+  };
 }
 
 export function normalizeMemberEmail(value) {

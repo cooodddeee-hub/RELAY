@@ -4,6 +4,7 @@ import PDFDocument from 'pdfkit';
 import { canEditProject, canReadProject } from '../src/services/projectPermissions.js';
 import {
   acquireHandoverLock,
+  allocateHandoverVersion,
   createHandoverSnapshot,
   nextHandoverVersion,
   renderHandoverPdf,
@@ -80,6 +81,33 @@ test('creates a snapshot from approved findings only and retains references and 
   assert.ok(!JSON.stringify(report).includes('Must not appear'));
   assert.equal(report.generatedBy.name, 'Reviewer');
   assert.equal(report.sections['Pending Tasks'].length, 0);
+});
+
+test('includes only human-confirmed conflicts with reviewer rationale and immutable revision provenance', async () => {
+  const report = createHandoverSnapshot({
+    project,
+    approvedFindings: [approvedFinding],
+    confirmedContradictions: [{
+      _id: 'candidate-1', status: 'confirmed_conflict',
+      claims: [{ summary: 'Launch date: June 5', category: 'Decision' }, { summary: 'Launch date: July 6', category: 'Decision' }],
+      reviewReason: 'Both exact source statements are current and conflict.', reviewedBy: 'reviewer-1', reviewedAt: new Date('2026-06-01T00:00:00Z'),
+      evidence: [
+        { source: { _id: 'source-1', originalName: 'plan-a.md' }, sourceRevision: { _id: 'revision-1', revisionKey: 'sha-a' }, quote: 'Launch is June 5.', matchedText: 'Launch is June 5.', startOffset: 0, endOffset: 18, locator: { type: 'heading', value: 'Plan A' } },
+        { source: { _id: 'source-2', originalName: 'plan-b.md' }, sourceRevision: { _id: 'revision-2', revisionKey: 'sha-b' }, quote: 'Launch is July 6.', matchedText: 'Launch is July 6.', startOffset: 0, endOffset: 18, locator: { type: 'heading', value: 'Plan B' } },
+      ],
+    }, { _id: 'candidate-2', status: 'candidate', claims: [], evidence: [] }],
+    version: 7,
+  });
+  const conflicts = report.sections['Confirmed Conflicts'];
+  assert.equal(report.confirmedConflictCount, 1);
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].reviewerRationale, 'Both exact source statements are current and conflict.');
+  assert.equal(conflicts[0].evidence[0].sourceRevisionId, 'revision-1');
+  const pdf = await renderHandoverPdf(report);
+  const text = extractPdfPageTexts(pdf).join(' ');
+  assert.match(text, /Confirmed Conflicts/);
+  assert.match(text, /Both exact source statements are current and conflict/);
+  assert.match(text, /revision sha-a/);
 });
 
 test('unverified and legacy evidence stay unverified in snapshots', () => {
@@ -297,11 +325,35 @@ test('versions increase sequentially for serialized generations', () => {
   assert.equal(nextHandoverVersion(2), 3);
 });
 
+test('atomically allocates distinct handover versions and floors legacy counters at saved versions', async () => {
+  let counter;
+  const Project = {
+    findOneAndUpdate(_filter, pipeline) {
+      const expression = pipeline[0].$set.handoverVersionCounter.$add;
+      const floor = Math.max(counter ?? 0, expression[0].$max[1]);
+      counter = floor + expression[1];
+      return { lean: async () => ({ handoverVersionCounter: counter }) };
+    },
+  };
+  const Handover = {
+    findOne() {
+      return { sort: () => ({ select: () => ({ lean: async () => ({ version: 7 }) }) }) };
+    },
+  };
+  const allocated = await Promise.all(Array.from({ length: 12 }, () => allocateHandoverVersion(Project, Handover, 'project-1')));
+  assert.deepEqual([...allocated].sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => i + 8));
+});
+
 test('project lock admits only one concurrent generation and allows the next after release', async () => {
   const document = { token: null, expiresAt: null };
   const Project = {
-    async updateOne(filter, update) {
-      const available = !document.expiresAt || document.expiresAt <= filter.$or[1].handoverLockExpiresAt.$lte;
+    async updateOne(filter, update, options) {
+      assert.ok(options.session, 'handover lock writes require a transaction');
+      assert.deepEqual(filter.$and[0]._id, 'project-1');
+      assert.ok(filter.$and[0].$or.some((item) => item.deletionState === 'active'));
+      assert.ok(filter.$and[1].$or.some((item) => item.owner === 'owner-1'));
+      assert.ok(filter.$and[1].$or.some((item) => item.members?.$elemMatch?.role === 'editor'));
+      const available = !document.expiresAt || document.expiresAt <= filter.$and[2].$or[1].handoverLockExpiresAt.$lte;
       if (!available) return { modifiedCount: 0 };
       document.token = update.$set.handoverLockToken;
       document.expiresAt = update.$set.handoverLockExpiresAt;
@@ -309,13 +361,15 @@ test('project lock admits only one concurrent generation and allows the next aft
     },
   };
   const now = new Date('2026-01-01T00:00:00Z');
+  const session = {};
   const results = await Promise.all([
-    acquireHandoverLock(Project, 'project-1', 'token-a', now),
-    acquireHandoverLock(Project, 'project-1', 'token-b', now),
+    acquireHandoverLock(Project, 'project-1', 'owner-1', 'token-a', now, 120_000, { session }),
+    acquireHandoverLock(Project, 'project-1', 'owner-1', 'token-b', now, 120_000, { session }),
   ]);
   assert.equal(results.filter(Boolean).length, 1);
   document.expiresAt = new Date(now.getTime() - 1);
-  assert.equal(await acquireHandoverLock(Project, 'project-1', 'token-c', now), true);
+  assert.equal(await acquireHandoverLock(Project, 'project-1', 'owner-1', 'token-c', now, 120_000, { session }), true);
+  await assert.rejects(acquireHandoverLock(Project, 'project-1', 'token-d', now), /transaction session/);
 });
 
 test('PDF includes evidence verification, escapes text and paginates long reports', async () => {

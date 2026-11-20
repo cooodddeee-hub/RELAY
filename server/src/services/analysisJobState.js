@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { canEditProject, canReadProject } from './projectPermissions.js';
 
-export function analysisFindingKey(projectId, sourceId, title) {
+export function analysisFindingKey(projectId, sourceId, title, revisionIdentity) {
   const normalized = String(title).normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
-  return createHash('sha256').update(`${projectId}:${sourceId}:${normalized}`).digest('hex');
+  const revision = revisionIdentity ? `:${revisionIdentity}` : '';
+  return createHash('sha256').update(`${projectId}:${sourceId}${revision}:${normalized}`).digest('hex');
 }
 
 export function publicAnalysisJob(job, now = new Date()) {
@@ -55,6 +56,38 @@ export function safeProviderAttempts(attempts) {
   });
 }
 
+const validationFailureCodes = new Set([
+  'invalid_json', 'invalid_response_envelope', 'missing_findings_array', 'invalid_finding_schema',
+  'missing_evidence', 'evidence_quote_mismatch', 'unsupported_evidence_reference', 'incomplete_provider_response',
+]);
+const validationStages = new Set(['provider_envelope', 'model_json', 'findings_array', 'finding_schema', 'evidence_reference', 'evidence_verification']);
+
+export function safeValidationDiagnostic(value) {
+  if (!value || !['gemini', 'cloudflare'].includes(value.provider)
+    || !validationFailureCodes.has(value.failureCode) || !validationStages.has(value.validationStage)) return undefined;
+  const sourceType = ['upload', 'readme', 'commit', 'issue', 'github_other'].includes(value.sourceType) ? value.sourceType : undefined;
+  const sourceId = /^[a-f\d]{24}$/i.test(String(value.sourceId || '')) ? String(value.sourceId) : undefined;
+  const sourcePosition = Number.isInteger(value.sourcePosition) && value.sourcePosition > 0 && value.sourcePosition <= 500
+    ? value.sourcePosition : undefined;
+  return {
+    provider: value.provider,
+    validationStage: value.validationStage,
+    failureCode: value.failureCode,
+    ...(sourceType ? { sourceType } : {}),
+    ...(sourceId ? { sourceId } : {}),
+    ...(sourcePosition ? { sourcePosition } : {}),
+    ...(value.quoteMatchDiagnostics
+      && ['exactQuoteMatch', 'caseOnlyMatch', 'punctuationOnlyMatch', 'unicodeNormalizationMatch']
+        .every((key) => typeof value.quoteMatchDiagnostics[key] === 'boolean')
+      ? { quoteMatchDiagnostics: {
+        exactQuoteMatch: value.quoteMatchDiagnostics.exactQuoteMatch,
+        caseOnlyMatch: value.quoteMatchDiagnostics.caseOnlyMatch,
+        punctuationOnlyMatch: value.quoteMatchDiagnostics.punctuationOnlyMatch,
+        unicodeNormalizationMatch: value.quoteMatchDiagnostics.unicodeNormalizationMatch,
+      } } : {}),
+  };
+}
+
 export function analysisRetryUpdate(job, now = new Date()) {
   return {
     $set: {
@@ -63,6 +96,7 @@ export function analysisRetryUpdate(job, now = new Date()) {
     },
     $unset: {
       retryAt: 1, lastErrorKind: 1, lastErrorStatus: 1, lastProviderAttempts: 1,
+      lastValidationFailure: 1,
       leaseToken: 1, leaseExpiresAt: 1,
     },
   };
@@ -83,6 +117,7 @@ export function analysisFailureDisposition({ retryable, attemptCount, maxAttempt
 
 export function analysisFailureCode(error) {
   if (error?.code === 'ANALYSIS_STEP_BUDGET') return 'step_budget_exceeded';
+  if (error?.code === 'ANALYSIS_REVISION_UNAVAILABLE') return 'revision_unavailable';
   if (error?.name === 'AnalysisJobError' && error.status === 404) return 'source_unavailable';
   const provider = ['gemini', 'cloudflare'].includes(error?.provider) ? error.provider : null;
   const kind = ['timeout', 'invalid_response', 'configuration', 'provider'].includes(error?.kind) ? error.kind : null;

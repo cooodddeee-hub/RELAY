@@ -22,18 +22,25 @@ export function sanitizeLogText(value) {
 export function errorDetails(error) {
   return {
     name: sanitizeLogText(error?.name || 'Error'),
-    message: sanitizeLogText(error?.message || 'Unknown error'),
-    stack: sanitizeLogText(error?.stack || ''),
+    // Provider/database exceptions can embed request URLs, document text,
+    // response bodies, or credentials. Keep diagnostics structural only.
+    ...(typeof error?.code === 'string' && /^[A-Z0-9_-]{1,80}$/i.test(error.code) ? { code: error.code } : {}),
   };
 }
 
 export function logError(operation, error, fields = {}) {
   const status = Number(error?.status ?? error?.statusCode) || undefined;
+  const safeFields = {};
+  if (Number.isInteger(fields?.status) && fields.status >= 100 && fields.status <= 599) safeFields.status = fields.status;
+  for (const key of ['projectId', 'sourceId', 'jobId', 'provider', 'stage']) {
+    const value = fields?.[key];
+    if (typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,120}$/.test(value)) safeFields[key] = value;
+  }
   console.error(JSON.stringify({
     level: 'error',
     operation: sanitizeLogText(operation),
     ...(status ? { status } : {}),
-    ...fields,
+    ...safeFields,
     error: errorDetails(error),
   }));
 }

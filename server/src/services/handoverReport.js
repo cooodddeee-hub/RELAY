@@ -2,7 +2,7 @@ import PDFDocument from 'pdfkit';
 
 export const HANDOVER_SECTIONS = [
   'Project Overview', 'Key Decisions', 'Completed Work', 'Pending Tasks',
-  'Responsibilities', 'Blockers', 'Dependencies', 'Risks', 'Next Actions', 'Unresolved Questions',
+  'Responsibilities', 'Blockers', 'Dependencies', 'Risks', 'Next Actions', 'Unresolved Questions', 'Confirmed Conflicts',
 ];
 
 const PDF_SECTIONS = [
@@ -16,16 +16,52 @@ const PDF_SECTIONS = [
   { title: 'Risks', keys: ['Risks'] },
   { title: 'Next Actions', keys: ['Next Actions'] },
   { title: 'Unresolved Questions', keys: ['Unresolved Questions'] },
+  { title: 'Confirmed Conflicts', keys: ['Confirmed Conflicts'], contradictions: true },
 ];
 
 export function nextHandoverVersion(latestVersion) {
   return Number.isInteger(latestVersion) && latestVersion > 0 ? latestVersion + 1 : 1;
 }
 
-export async function acquireHandoverLock(Project, projectId, token, now = new Date(), lockMs = 120_000) {
+/**
+ * Allocate a version using a single atomic update to the project document.
+ * The persisted counter is floored at the highest existing handover version,
+ * which keeps projects created before the counter was introduced compatible.
+ * A failed report insert may leave a gap; version reuse is intentionally avoided.
+ */
+export async function allocateHandoverVersion(Project, Handover, projectId, { session } = {}) {
+  let latestQuery = Handover.findOne({ project: projectId }).sort({ version: -1 }).select('version');
+  if (session) latestQuery = latestQuery.session(session);
+  const latest = await latestQuery.lean();
+  const latestVersion = Number.isInteger(latest?.version) && latest.version > 0 ? latest.version : 0;
+  const project = await Project.findOneAndUpdate(
+    { _id: projectId },
+    [{
+      $set: {
+        handoverVersionCounter: {
+          $add: [{ $max: [{ $ifNull: ['$handoverVersionCounter', 0] }, latestVersion] }, 1],
+        },
+      },
+    }],
+    { new: true, projection: { handoverVersionCounter: 1 }, ...(session ? { session } : {}) },
+  ).lean();
+  if (!project) throw new Error('Project disappeared while allocating a handover version.');
+  return project.handoverVersionCounter;
+}
+
+export async function acquireHandoverLock(Project, projectId, actorId, token, now = new Date(), lockMs = 120_000, { session } = {}) {
+  if (!session) throw new TypeError('Handover lock acquisition requires a transaction session.');
   const result = await Project.updateOne(
-    { _id: projectId, $or: [{ handoverLockExpiresAt: { $exists: false } }, { handoverLockExpiresAt: { $lte: now } }] },
+    { $and: [
+      { _id: projectId, $or: [{ deletionState: 'active' }, { deletionState: { $exists: false } }] },
+      { $or: [
+        { owner: actorId },
+        { members: { $elemMatch: { user: actorId, role: 'editor' } } },
+      ] },
+      { $or: [{ handoverLockExpiresAt: { $exists: false } }, { handoverLockExpiresAt: { $lte: now } }] },
+    ] },
     { $set: { handoverLockToken: token, handoverLockExpiresAt: new Date(now.getTime() + lockMs) } },
+    { session },
   );
   return result.modifiedCount === 1;
 }
@@ -41,7 +77,7 @@ function sourceId(evidence) {
   return source?._id ? String(source._id) : typeof source === 'string' ? source : null;
 }
 
-export function createHandoverSnapshot({ project, approvedFindings, version, generatedAt = new Date(), generatedBy }) {
+export function createHandoverSnapshot({ project, approvedFindings, confirmedContradictions = [], version, generatedAt = new Date(), generatedBy }) {
   const findings = (approvedFindings || []).filter((finding) => finding.status === 'approved');
   const sections = Object.fromEntries(HANDOVER_SECTIONS.map((section) => [section, []]));
   sections['Project Overview'].push({
@@ -69,12 +105,36 @@ export function createHandoverSnapshot({ project, approvedFindings, version, gen
     });
   }
 
+  sections['Confirmed Conflicts'] = (confirmedContradictions || []).filter((item) => item.status === 'confirmed_conflict').map((item) => ({
+    candidateId: String(item._id),
+    status: 'confirmed_conflict',
+    title: 'Conflict between: ' + (item.claims || []).map((claim) => claim.summary).join(' / ').slice(0, 460),
+    description: item.reviewReason || 'A reviewer confirmed conflicting information.',
+    reviewerRationale: item.reviewReason || '',
+    reviewedBy: item.reviewedBy?._id ? String(item.reviewedBy._id) : item.reviewedBy ? String(item.reviewedBy) : null,
+    reviewedAt: item.reviewedAt ? new Date(item.reviewedAt).toISOString() : null,
+    claims: (item.claims || []).map((claim) => ({ summary: claim.summary, category: claim.category || null })),
+    evidence: (item.evidence || []).map((entry) => ({
+      sourceId: sourceId(entry),
+      sourceRevisionId: entry.sourceRevision?._id ? String(entry.sourceRevision._id) : String(entry.sourceRevision),
+      sourceName: entry.sourceName || entry.source?.originalName || 'Source filename unavailable',
+      revisionKey: entry.sourceRevision?.revisionKey || null,
+      quote: entry.quote || '',
+      verificationStatus: 'verified',
+      matchedText: entry.matchedText || null,
+      startOffset: Number.isInteger(entry.startOffset) ? entry.startOffset : null,
+      endOffset: Number.isInteger(entry.endOffset) ? entry.endOffset : null,
+      locator: entry.locator || null,
+    })),
+  }));
+
   return {
     version,
     generatedAt: new Date(generatedAt).toISOString(),
     generatedBy: generatedBy ? { id: String(generatedBy._id || generatedBy.id), name: generatedBy.name || generatedBy.email || 'RELAY user' } : null,
     project: { id: String(project._id), name: project.name, description: project.description || '' },
     approvedFindingCount: findings.length,
+    confirmedConflictCount: sections['Confirmed Conflicts'].length,
     emptyMessage: findings.length ? null : 'No approved findings were available when this report was generated.',
     sections,
   };
@@ -87,6 +147,9 @@ function printableText(value) {
 }
 
 function sectionItems(report, definition) {
+  if (definition.contradictions) {
+    return (report.sections?.['Confirmed Conflicts'] || []).filter((item) => item?.status === 'confirmed_conflict');
+  }
   for (const key of definition.keys) {
     const items = report.sections?.[key];
     if (Array.isArray(items) && items.length) return items.filter(isApprovedSnapshotItem);
@@ -97,7 +160,7 @@ function sectionItems(report, definition) {
 
 function isApprovedSnapshotItem(item) {
   const status = item?.approvalStatus || item?.status;
-  return !status || status === 'approved';
+  return !status || status === 'approved' || status === 'confirmed_conflict';
 }
 
 function overviewText(report, items) {
@@ -174,7 +237,9 @@ function evidenceHeight(document, evidence, width) {
 function drawEvidence(document, evidence, width) {
   const verified = evidence.verificationStatus === 'verified' && typeof evidence.matchedText === 'string';
   const quote = verified ? evidence.matchedText : evidence.quote;
-  const name = evidence.sourceName || (evidence.sourceId ? `Source ID ${evidence.sourceId}` : 'Source filename unavailable');
+  const baseName = evidence.sourceName || (evidence.sourceId ? `Source ID ${evidence.sourceId}` : 'Source filename unavailable');
+  const revision = evidence.revisionKey || evidence.sourceRevisionId;
+  const name = revision ? `${baseName} | revision ${revision}` : baseName;
   const label = verified ? 'Verified against source' : 'APPROVED FINDING - QUOTE NOT VERIFIED AGAINST SOURCE';
   const needed = evidenceHeight(document, evidence, width);
   const maximum = contentBottom(document) - document.page.margins.top;
@@ -417,7 +482,7 @@ export function renderHandoverPdf(report) {
       if (!items.length) {
         const width = document.page.width - document.page.margins.left - document.page.margins.right;
         document.font('Helvetica-Oblique').fontSize(9.5).fillColor('#778198')
-          .text('No approved information available.', { width, lineGap: 3 });
+          .text(definition.contradictions ? 'No reviewer-confirmed conflicts were present when this handover was generated.' : 'No approved information available.', { width, lineGap: 3 });
         document.moveDown(0.45);
         continue;
       }

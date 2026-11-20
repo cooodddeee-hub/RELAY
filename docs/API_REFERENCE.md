@@ -4,7 +4,7 @@ This reference was checked against `server/src/app.js`, all route modules in `se
 
 ## Base URL and common behavior
 
-The local API base is `http://localhost:5000/api`. In local frontend development, Vite proxies `/api` to `http://127.0.0.1:5000`.
+The backend listens on `PORT` or defaults to `5001`; the local API base is `http://127.0.0.1:5001/api`. Vite proxies `/api` to `http://127.0.0.1:5001`.
 
 Unless specified otherwise, endpoints require:
 
@@ -14,7 +14,7 @@ Authorization: Bearer <JWT>
 
 JSON endpoints accept `Content-Type: application/json`. The Express JSON parser has a 2 MB limit. Uploads use `multipart/form-data`.
 
-`GET /api/health` is the only route mounted without `requireAuth`. The API applies Helmet, configured CORS, and a global rate limit of 300 requests per 15 minutes. The global error handler returns `{ "message": "Internal server error" }` for errors with status 500 or higher; lower-status errors use `{ "message": "..." }` when the error has a message. Some route-specific responses below are returned directly.
+`GET /api/health`, the state-protected GitHub setup/OAuth callbacks, and the `CRON_SECRET`-protected internal cleanup route do not use a RELAY user JWT. Other application routes require one. The API applies Helmet, configured CORS, a global rate limit of 300 requests per 15 minutes, plus dedicated login limits (10 per 15 minutes per IP) and registration limits (5 per hour per IP). The global error handler returns `{ "message": "Internal server error" }` for errors with status 500 or higher; lower-status errors use `{ "message": "..." }` when the error has a message. Some route-specific responses below are returned directly.
 
 Project role shorthand used below:
 
@@ -22,7 +22,79 @@ Project role shorthand used below:
 - **Editor**: project owner or editor.
 - **Owner**: project owner only.
 
-No endpoint below defines query parameters. IDs in paths are MongoDB ObjectIds. Project, finding, source, and handover access is checked on the backend.
+Query parameters are listed for routes that accept them. IDs in paths are MongoDB ObjectIds unless a route specifies GitHub's numeric ID. Project, finding, source, and handover access is checked on the backend.
+
+## Round 3 workflows
+
+Round 3 endpoints are listed below with their route-mounted paths. All `/api/projects/...` operations require a JWT. `Member`, `Editor`, and `Owner` have the meanings defined above. Assignment roles are independent from editor permissions. Provider credentials are never returned to clients.
+
+### GitHub App, repositories, and sync
+
+| Method and path | Access | Success | Important errors/behavior |
+| --- | --- | --- | --- |
+| `GET /api/integrations/github/setup` | GitHub callback; no RELAY JWT | `302` to GitHub OAuth after consuming valid setup state and verifying installation | `400` invalid/expired/replayed state or unsupported action; `403` initiating actor no longer owns project; `409` suspended installation; `503` GitHub not configured |
+| `GET /api/integrations/github/oauth/callback` | GitHub callback; no RELAY JWT | `302` back to the original frontend project with a safe outcome query | `400` invalid/expired/replayed state; callback failures redirect with safe outcome; temporary user token is revoked before persisting authorization |
+| `POST /api/projects/:id/github/installations/start` | Owner | `201 { installationUrl }` | `403` non-owner; `503` integration not configured |
+| `POST /api/projects/:id/github/installations/authorize` | Owner | `201 { authorizationUrl }` for existing installations | `403` non-owner; `503` integration not configured |
+| `GET /api/projects/:id/github/installations` | Owner | `200 { installations: [...] }` with account identity and status/verification summary | `403` non-owner; stale status is exposed as unverified/needs verification rather than asserted active |
+| `GET /api/projects/:id/github/repositories` | Member for linked metadata; Owner when `installationId` is supplied | `200 { repositories: [...] }` or empty list | With `installationId`, optional `page` is 1–10 and installation access is refreshed; `400` invalid page; `403` discovery by non-owner; `404` unauthorized installation; `409` suspended installation |
+| `POST /api/projects/:id/github/repositories` | Owner | `201 { repository }` | Body `{ installationId, repositoryId }`; `400` invalid IDs; `404` inaccessible repository/installation; `409` already linked; linking is explicit |
+| `DELETE /api/projects/:id/github/repositories/:linkId` | Owner | `200 { message }` | Soft-unlinks the active link; preserves link identity/provenance; `404` no active link |
+| `POST /api/projects/:id/github/repositories/:linkId/sync` | Owner | `201 { job }` for a new job, `202 { job }` while running, or `200 { job }` for an existing completed result | `400` invalid link ID; `403` non-owner; `409`/other safe service error for conflict or unavailable sync; manual synchronous bounded request, no automatic AI analysis |
+| `GET /api/projects/:id/github/sync-jobs/:jobId` | Member | `200 { job }` | `403` cross-project/no access; status includes persisted stage, checkpoint, counts and retry metadata |
+| `POST /api/projects/:id/github/sync-jobs/:jobId/retry` | Owner | `200 { job }` or `202 { job }` while running | `403` non-owner; safe service error for non-retryable/conflicting job |
+
+GitHub provider failures use sanitized messages and safe codes; rate-limit responses may include `Retry-After`. The callback state is one-time, purpose-bound, project/actor-bound, and expiring.
+
+### Assignments, workflow policy, and audit
+
+| Method and path | Access | Success | Important errors/behavior |
+| --- | --- | --- | --- |
+| `GET /api/projects/:id/assignments` | Member | `200 { assignments, canManageAssignments }` | Owners see history; other members see active assignments |
+| `POST /api/projects/:id/assignments` | Owner | `201 { assignment }` | Assign reviewer, approver, or audit-reader scope; `400` invalid body/scope; `403` non-owner; `409` duplicate active assignment or invalid target |
+| `POST /api/projects/:id/assignments/:assignmentId/revoke` | Owner | `200 { assignment }` | Optional reason up to 1,000 chars; revoked history retained; `404` inactive/missing assignment |
+| `POST /api/projects/:id/assignments/:assignmentId/reassign` | Owner | `201 { assignment }` | Revoke and replacement assignment are atomic; reason optional, up to 1,000 chars |
+| `PATCH /api/projects/:id/workflow-policy` | Owner | `200 { workflowPolicy }` | Body contains `reviewMode` (`legacy_editors`/`assigned`) and/or `signoffMode` (`none`/`assigned`); assigned mode requires an active corresponding assignment; invalid mode `400`, absent assignment `409` |
+| `GET /api/projects/:id/audit-events?limit=50` | Owner or assigned audit reader | `200 { events }` (default 50, maximum 100) | `403` unauthorized audit reader; invalid limit `400`; retention expiry is configured server-side |
+
+New projects default to assigned review and signoff. Existing projects retain legacy behavior until an owner changes policy.
+
+### Contradiction candidates
+
+| Method and path | Access | Success | Important errors/behavior |
+| --- | --- | --- | --- |
+| `GET /api/projects/:id/contradictions?status=...` | Member | `200 { candidates }` | Optional status filter; invalid status `400` |
+| `POST /api/projects/:id/contradictions/detect` | Owner/editor | `200 { detectedPairs, createdCount, candidates }` | Request body must be empty; detection only proposes cautious evidence-backed candidates and never confirms them; duplicate race `409` |
+| `POST /api/projects/:id/contradictions/:candidateId/review` | Assigned reviewer in assigned mode; owner/editor in legacy mode | `200 { candidate }` | Body `{ status, reason }`; reason required (1–2,000 chars); only human transitions confirm/dismiss; unauthorized reviewer `403`, invalid transition/input `400`/`409` |
+| `GET /api/projects/:id/contradictions/:candidateId/history` | Owner or assigned audit reader | `200 { events }` | `403` if audit access is not granted; `404` candidate not found |
+
+Only candidates in `confirmed_conflict` state are included in a newly generated handover, with their evidence and reviewer rationale. This detector is limited to supported evidence-backed patterns and is not general-purpose semantic contradiction detection.
+
+### Handover versions and signoff
+
+| Method and path | Access | Success | Important errors/behavior |
+| --- | --- | --- | --- |
+| `POST /api/projects/:id/handover` | Owner/editor | `201 { handover }` | `approvalStatus` is `pending` when assigned signoff is enabled, otherwise `draft`; includes approved findings and confirmed conflicts; lock contention `409` |
+| `GET /api/projects/:id/handovers` | Member | `200 { handovers }` | Includes computed `effectiveStatus`; a pending older version becomes `superseded` when a newer version exists |
+| `GET /api/handovers/:handoverId` | Member of project | `200 { handover }` | Includes computed `effectiveStatus`; project in deletion lifecycle `410` |
+| `POST /api/handovers/:handoverId/signoffs` | Active assigned approver; creator excluded | `201 { signoff }` | Body `{ decision: "approved"|"rejected", comment, reason? }`; comment required, rejection reason required; disabled workflow `409`, unauthorized/self-approval/superseded version `403`/`409`, duplicate terminal decision `409` |
+| `GET /api/handovers/:handoverId/signoffs` | Member of project | `200 { signoffs, effectiveStatus }` | Signoff records are append-only and tied to exact handover ID/version |
+| `GET /api/handovers/:handoverId/download` | Member of project | `200` PDF attachment | Renders the stored immutable snapshot; does not regenerate it |
+
+One approval is sufficient. Any rejection is terminal for that version; a new handover version requires its own decision.
+
+### Project deletion and recovery
+
+| Method and path | Access | Success | Important errors/behavior |
+| --- | --- | --- | --- |
+| `DELETE /api/projects/:id` | Owner | `202 { message, deletion: { state, requestedAt, recoveryEndsAt, jobId } }` | Tombstones/freezes access; recovery window is 30 days; audit retention configuration failure `503` |
+| `GET /api/projects/:id/deletion` | Owner | `200 { deletion: { ..., recoveryEndsAt, job } }` | `404` if no owner-visible deletion request |
+| `POST /api/projects/:id/deletion/cancel` | Owner | `200 { message, project: { id, deletionState } }` | Cancels only during recovery period before purge starts; late recovery is rejected |
+| `GET /api/internal/project-deletions/process` | Vercel cron bearer (`CRON_SECRET`), no user JWT | `200 { processedProjects, batches, results }` | `401` invalid bearer; `503` secret not configured; processes bounded retryable cleanup batches |
+
+### GitHub source deletion
+
+`DELETE /api/sources/:sourceId` requires an editor, but returns `409` for GitHub-imported sources because source/revision provenance is retained. Unlink its repository to stop future sync. Uploaded sources retain their existing deletion behavior.
 
 ## Authentication
 
@@ -99,15 +171,15 @@ Update project fields.
 
 ### `DELETE /api/projects/:id`
 
-Delete a project document.
+Request project deletion and enter its recovery lifecycle.
 
 - **Auth:** Required.
 - **Authorization:** Owner only.
 - **Path:** `id` — project ObjectId.
 - **Body:** None consumed.
-- **Success:** `200` — `{ "message": "Project deleted" }`.
+- **Success:** `202` — `{ "message": "Project access is frozen. Recovery is available for 30 days before cleanup.", "deletion": { "state", "requestedAt", "recoveryEndsAt", "jobId" } }`.
 - **Errors:** `400` invalid ID; `403` non-owner; `404` not found; otherwise global error response.
-- **Behavior:** The route calls `deleteOne()` on the Project document. It does not implement a cascade for related sources, findings, review history, uploaded files, or handovers.
+- **Behavior:** The route starts the owner-authorized tombstone/recovery lifecycle and returns `202`; it does not synchronously erase project records. Cleanup is performed by the authenticated scheduled processor after the recovery period.
 
 ## Project members
 
@@ -169,9 +241,24 @@ Upload and extract a source document.
 - **Authorization:** Editor.
 - **Path:** `id` — project ObjectId.
 - **Request:** `multipart/form-data`, one file in field `file`. Accepted filename extensions: `.pdf`, `.docx`, `.txt`, `.md`. Maximum size is 15 MiB (15 × 1024 × 1024 bytes).
-- **Success:** `201` — `{ "source": { "_id": "...", "originalName": "...", "status": "processed", "extractedCharacters": number } }`.
-- **Errors:** `400` when no file was chosen; `400` invalid project ID; `403` caller lacks project access or editor permission; `404` project not found. Multer, extraction, and database errors pass to the global error handler; an error without an explicit status is returned as `500`.
-- **Behavior:** The original file is written to local disk. The Source record and extracted text are stored in MongoDB. On extraction failure, the source is marked `failed`; the upload route does not explicitly remove the file.
+- **Success:** `201` — `{ "source": { "_id": "...", "originalName": "...", "status": "processed", "extractedCharacters": number } }` when local-disk uploads are enabled.
+- **Errors:** `410` when local-disk uploads are disabled (including production); `400` missing/invalid file; `403` caller lacks editor access; extraction/database errors use the global handler.
+- **Behavior:** This is the legacy local-disk upload path. Production should use the signed Supabase upload-intent workflow below. Maximum file size is 15 MiB; accepted extensions are PDF, DOCX, TXT, and MD.
+
+### `POST /api/projects/:id/sources/upload-intent`
+
+- **Auth/authorization:** Required; owner/editor.
+- **Body:** `{ "originalName", "mimeType", "size" }`; extension, MIME type, and 1 byte–15 MiB size are checked.
+- **Success:** `201 { source: { _id, originalName, mimeType, size, status, uploadStatus }, uploadUrl }`. `uploadUrl` is a short-lived capability for the configured private Supabase bucket; keep it private.
+- **Errors:** `400` invalid metadata; `403` insufficient role; `410` project deletion has started; `503` storage configuration unavailable; `502` safe storage-provider failure.
+
+### `POST /api/sources/:sourceId/complete`
+
+Finalize a previously authorized Supabase upload and extract text.
+
+- **Auth:** Required; project member, with uploader/intent checks performed by the workflow.
+- **Success:** `200 { source: { _id, originalName, status, uploadStatus, extractedCharacters }, alreadyCompleted }`.
+- **Errors:** `400` invalid upload; `403` unauthorized source/uploader; `404` missing upload intent; `409` mismatched or incomplete object; `410` project deletion lifecycle; `503` storage configuration issue. Repeated completion is safe and idempotent.
 
 ### `GET /api/projects/:id/sources`
 
@@ -192,16 +279,26 @@ Read extracted text for a processed source.
 - **Path:** `sourceId` — source ObjectId.
 - **Success:** `200` — `{ "source": { "_id": "...", "originalName": "...", "mimeType": "...", "size": number, "extractedText": "..." } }`.
 - **Errors:** `403` access denied; `404` source not found; `409` source processing has not completed; otherwise global error response.
+- **Query:** GitHub sources may specify `revisionId=<SourceRevision ObjectId>` to retrieve the exact immutable snapshot; without it, current extracted text is returned. Invalid revision query is `400`; a revision not belonging to the source is `404`.
+
+### `GET /api/sources/:sourceId/revisions`
+
+List immutable GitHub source revisions and provenance metadata.
+
+- **Auth:** Required; project member.
+- **Query:** `page` defaults to 1; `limit` defaults to 20 and is capped at 50.
+- **Success:** `200 { revisions, page, limit, total, hasMore }`. Each revision includes its key/hash, provider timestamps, locator, and `isCurrent`/`isAnalyzed` flags. For uploaded sources the response is an empty revision list.
+- **Errors:** `400` invalid source ID or pagination; `403` no project access; `404` source missing; `410` project deletion lifecycle.
 
 ### `GET /api/sources/:sourceId/download`
 
-Download the original uploaded file.
+Download the original uploaded file, or read the normalized text representation for a GitHub source.
 
 - **Auth:** Required.
 - **Authorization:** Member of the source’s project.
 - **Path:** `sourceId` — source ObjectId.
-- **Success:** File attachment named using the original filename’s basename. Express sets file response headers; there is no JSON success envelope.
-- **Errors:** `403` access denied; `404` source not found; file-system errors pass to the global error handler if response headers have not been sent.
+- **Success:** Uploaded source returns a file attachment (or a short-lived Supabase redirect); GitHub source returns plain text with its source MIME type.
+- **Errors:** `403` access denied; `404` source not found; `503` storage unavailable; `410` local file unavailable. File-system errors use the global handler if response headers have not been sent.
 
 ### `GET /api/sources/:sourceId`
 
@@ -221,23 +318,35 @@ Delete a source and attempt to remove its local file.
 - **Authorization:** Editor.
 - **Path:** `sourceId` — source ObjectId.
 - **Body:** None consumed.
-- **Success:** `200` — `{ "message": "Source deleted" }`.
-- **Errors:** `403` no project access or editor permission; `404` source not found; otherwise global error response.
-- **Behavior:** File unlink errors are ignored before the Source record is deleted.
+- **Success:** `200` — `{ "message": "Source deleted" }` for uploaded sources.
+- **Errors:** `403` no project access or editor permission; `404` source not found; `409` for GitHub-imported sources, which are retained for revision/handover provenance; otherwise global error response.
+- **Behavior:** GitHub sources cannot be directly deleted. Unlink the repository to stop future synchronization. Uploaded-source file cleanup follows the configured storage backend.
 
-## Gemini analysis and findings
+## AI analysis jobs and findings
 
 ### `POST /api/projects/:id/analyze`
 
-Analyze processed, not-yet-analyzed sources for a project.
+Create or retrieve a persisted analysis job for selected processed sources.
 
 - **Auth:** Required.
 - **Authorization:** Editor.
 - **Path:** `id` — project ObjectId.
-- **Body:** No fields are consumed. The current frontend sends an empty JSON object.
-- **Success:** `200` — `{ "findings": [...], "message": "AI findings created; human review is required" }`. If all processed sources were already analyzed, the response contains current project findings and a message stating that sources have already been analyzed.
-- **Errors:** `400` invalid project ID or no processed sources; `403` not a project member/editor; `404` project not found; `409` analysis lock already held or expired; `429` provider rate limit; `502` unusable Gemini response; `503` provider unavailable/configuration failure; `504` provider timeout; other failures may return `500`.
-- **Behavior:** A project-level lock prevents concurrent analysis. The service retries selected transient Gemini/network failures up to two times after the initial call, uses a 30-second provider timeout, and analyzes up to two sources concurrently. Each prompt includes at most 45,000 characters of source text. Analysis writes are deduplicated; uploaded sources are retained on failure. Error messages are sanitized. Retryable `429` and `503` responses include `Retry-After: 2`.
+- **Body:** Optional `{ "sourceIds": ["..."] }`; when omitted, eligible project sources are selected by the existing job service.
+- **Success:** `202` for a newly queued job, `200` for an existing/started job, or `200 { "job": null, "alreadyAnalyzed": true, "message": ... }` when all eligible sources are already analyzed. The job is advanced explicitly through the routes below; this endpoint does not run the complete analysis synchronously.
+- **Errors:** `400` invalid selection/no eligible sources; `403` caller cannot edit project; `404` project not found; `409` conflicting job/state; provider errors are surfaced when a source step is advanced, not during job creation.
+- **Behavior:** GitHub sources are pinned to their current immutable revision when the job is created; retries keep that revision. Uploaded-source behavior and legacy jobs remain supported. Each source input is limited to 45,000 characters, and evidence verification uses the exact analyzed snapshot. GitHub sync never starts analysis automatically.
+
+### `GET /api/projects/:id/analysis-job`
+
+Read the project's persisted analysis job. **Auth:** Member. **Success:** `200 { job }` (job may be null). **Errors:** `403` non-member; `404` project not found.
+
+### `GET /api/analysis-jobs/:jobId`
+
+Read one analysis job. **Auth:** Project member allowed to read the job. **Success:** `200 { job }`. **Errors:** `400` invalid ID; `403` no access; `404` missing job; `410` project deletion lifecycle.
+
+### `POST /api/analysis-jobs/:jobId/advance` and `POST /api/analysis-jobs/:jobId/retry`
+
+Advance one source or explicitly retry a failed source. **Auth:** Owner/editor. **Success:** `200 { job }`. **Errors:** `400` invalid transition; `403` unauthorized; `404` job missing; `409` conflict; provider failures use safe status/error responses. Completed source checkpoints are retained across retries.
 
 ### `GET /api/projects/:id/findings`
 
@@ -333,9 +442,9 @@ Create the next saved handover version from currently approved findings.
 - **Authorization:** Editor.
 - **Path:** `id` — project ObjectId.
 - **Body:** No fields are consumed.
-- **Success:** `201` — `{ "handover": <serialized Handover document> }`, including `version`, `reportContent`, `findingIds`, `createdBy`, and `approvalStatus: "draft"`.
+- **Success:** `201` — `{ "handover": <serialized Handover document> }`, including `version`, `reportContent`, `findingIds`, `createdBy`, and `approvalStatus: "pending"` when assigned signoff is enabled or `"draft"` otherwise.
 - **Errors:** `400` invalid project ID; `403` not a project member/editor; `404` project not found; `409` another handover is being generated; otherwise global error response.
-- **Behavior:** The snapshot includes only findings whose status is `approved` at generation time. A lock prevents concurrent version creation. The saved snapshot is not updated by later finding changes. No report approval endpoint is implemented.
+- **Behavior:** The immutable snapshot includes findings approved at generation time and only human-confirmed contradiction candidates, with evidence/rationale. A lock prevents concurrent version creation. The saved snapshot is not updated by later changes. In assigned mode, an approver other than the creator must sign the exact version; legacy mode leaves it as draft.
 
 ### `GET /api/projects/:id/handovers`
 
