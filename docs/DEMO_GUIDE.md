@@ -32,7 +32,7 @@ cd server
 Copy-Item .env.example .env -NoClobber
 ```
 
-Set private local values in `server/.env` for `MONGODB_URI`, `JWT_SECRET`, `CLIENT_URL`, and `GEMINI_API_KEY`. `PORT` defaults to `5000`; local `CLIENT_URL` is `http://localhost:5173`. Configure `GEMINI_MODEL` only to a model identifier confirmed available to your account. Do not share terminal output or environment files containing credentials.
+Set private local values in `server/.env` for `MONGODB_URI`, `JWT_SECRET`, `CLIENT_URL`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and the Supabase storage settings. `PORT` defaults to `5001`; local `CLIENT_URL` is `http://localhost:5173`. Cloudflare Workers AI is primary and Gemini (`GEMINI_API_KEY`, optional `GEMINI_MODEL`) is secondary. GitHub workflows additionally require the seven `GITHUB_APP_*` variables listed in [GitHub App Setup](GITHUB_APP_SETUP.md). Do not share terminal output or environment files containing credentials.
 
 Then, still in Terminal 1:
 
@@ -49,7 +49,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The development server proxies `/api` requests to `http://127.0.0.1:5000`. The backend health URL is `http://localhost:5000/api/health`.
+Open `http://localhost:5173`. The development server proxies `/api` requests to `http://127.0.0.1:5001`. The backend health URL is `http://localhost:5001/api/health`.
 
 If dependencies are already installed, skip `npm install`. For the complete setup and production API URL configuration, see [Backend Setup](../BACKEND_SETUP.md).
 
@@ -128,6 +128,14 @@ The owner can add only an already registered RELAY account. There is no email in
 6. As a Viewer, show read access to project sources, findings, evidence, history, and reports. Upload, analysis, review, and membership changes are not allowed.
 7. Change the member’s role from the owner’s Team view to demonstrate the permission difference. The backend enforces the role; frontend visibility is not the only control.
 
+### Demonstrate GitHub, contradictions, signoff, and recovery
+
+1. As the project owner, authorize the configured GitHub App, discover an installation, discover repositories, and explicitly link one. Run **Sync GitHub** manually; sync does not automatically start AI analysis.
+2. Select imported GitHub sources in the existing explicit analysis action. Show that evidence is tied to its immutable source revision.
+3. In project review, detect contradiction candidates. They remain suspected until a permitted human reviewer confirms or dismisses with rationale. Only confirmed conflicts are included in subsequently generated handovers.
+4. For a new assigned-workflow project, assign a reviewer/approver. Generate a handover as an eligible editor, then sign in as the assigned approver (not its creator) to approve or reject that exact version. Rejection requires a reason; a new version needs its own decision.
+5. In owner settings, request project deletion and show the recovery deadline. Recover within the 30-day window before cleanup starts. Do not use a production project for this demonstration.
+
 For a shorter presentation, explain the role matrix without creating a second account. Do not claim an unperformed role test.
 
 ### Generate and download a handover
@@ -136,7 +144,7 @@ For a shorter presentation, explain the role matrix without creating a second ac
 2. As owner or editor, open **Handover Reports** and choose **Generate New Version**.
 3. Select the saved version in the version history and show its report preview.
 4. Choose **Download PDF**. The authenticated API renders a PDF from the saved snapshot. The browser checks for `application/pdf` and a PDF file signature before starting the download.
-5. Explain that later finding edits or reviews do not rewrite the generated version. A new generation creates the next version. Reports are created as drafts; a separate report approval endpoint is not implemented.
+5. Explain that later finding edits or reviews do not rewrite the generated version. A new generation creates the next version. In assigned workflow, signoff decisions are recorded against the exact handover version; the creator cannot approve their own version and rejection requires a reason.
 
 PDF download requires a real saved handover and a project membership. There is no report generation or PDF export in sample mode.
 

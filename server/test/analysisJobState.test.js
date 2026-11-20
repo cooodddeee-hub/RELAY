@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   analysisFailureCode, analysisFailureDisposition, analysisFindingKey, analysisJobClaimState, canAccessAnalysisJob,
-  analysisRetryUpdate, isEligibleDemoFallback, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction, safeProviderAttempts,
+  analysisRetryUpdate, isEligibleDemoFallback, nextAnalysisCheckpoint, publicAnalysisJob, reuseActiveAnalysisJob, runMongoTransaction, safeProviderAttempts, safeValidationDiagnostic,
 } from '../src/services/analysisJobState.js';
 import { DEMO_ANALYSIS_FALLBACK } from '../../client/src/data/demoAnalysisFallback.js';
 
@@ -90,6 +90,27 @@ test('provider attempt metadata is sanitized and survives the public job status 
   assert.equal(JSON.stringify(publicJob).includes('must-not-persist'), false);
 });
 
+test('validation diagnostics retain only allowlisted source and failure metadata', () => {
+  const diagnostic = safeValidationDiagnostic({
+    provider: 'cloudflare', sourceType: 'commit', sourceId: '507f1f77bcf86cd799439011', sourcePosition: 3,
+    validationStage: 'evidence_verification', failureCode: 'evidence_quote_mismatch',
+    quoteMatchDiagnostics: { exactQuoteMatch: false, caseOnlyMatch: true, punctuationOnlyMatch: false, unicodeNormalizationMatch: false },
+    quote: 'private quote', sourceText: 'private source', token: 'private token', stack: 'private stack',
+  });
+  assert.deepEqual(diagnostic, {
+    provider: 'cloudflare', sourceType: 'commit', sourceId: '507f1f77bcf86cd799439011', sourcePosition: 3,
+    validationStage: 'evidence_verification', failureCode: 'evidence_quote_mismatch',
+    quoteMatchDiagnostics: { exactQuoteMatch: false, caseOnlyMatch: true, punctuationOnlyMatch: false, unicodeNormalizationMatch: false },
+  });
+  const job = publicAnalysisJob({ _id: 'job-safe', status: 'failed', lastValidationFailure: diagnostic });
+  assert.deepEqual(job.lastValidationFailure, diagnostic);
+  const serialized = JSON.stringify(job);
+  for (const privateValue of ['private quote', 'private source', 'private token', 'private stack']) {
+    assert.equal(serialized.includes(privateValue), false);
+  }
+  assert.equal(safeValidationDiagnostic({ ...diagnostic, failureCode: 'arbitrary payload' }), undefined);
+});
+
 test('demo fallback is unavailable for invalid output, permanent/provider configuration errors, or incomplete provider sequences', () => {
   const providers = [
     { status: 'failed', lastErrorKind: 'cloudflare_invalid_response', lastProviderAttempts: [{ provider: 'gemini', outcome: 'temporary_failure' }, { provider: 'cloudflare', outcome: 'invalid_output' }] },
@@ -114,6 +135,7 @@ test('the persisted retry update clears provider eligibility metadata and resume
   assert.equal(update.$set.status, 'queued');
   assert.equal(update.$set.currentSource, 'source-b');
   assert.equal(update.$unset.lastProviderAttempts, 1);
+  assert.equal(update.$unset.lastValidationFailure, 1);
   assert.equal(update.$unset.lastErrorKind, 1);
 });
 
@@ -158,6 +180,8 @@ test('Mongo transaction wrapper always closes session and propagates rollback fa
 test('finding deduplication keys include source and normalize equivalent titles', () => {
   assert.equal(analysisFindingKey('project', 'source-a', ' API  Decision '), analysisFindingKey('project', 'source-a', 'api decision'));
   assert.notEqual(analysisFindingKey('project', 'source-a', 'API Decision'), analysisFindingKey('project', 'source-b', 'API Decision'));
+  assert.notEqual(analysisFindingKey('project', 'source-a', 'API Decision', 'revision-1'), analysisFindingKey('project', 'source-a', 'API Decision', 'revision-2'));
+  assert.equal(analysisFindingKey('project', 'source-a', 'API Decision'), analysisFindingKey('project', 'source-a', 'API Decision', undefined));
 });
 
 test('analysis job read and mutation authorization follows project roles', () => {

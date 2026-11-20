@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import { requireAuth } from '../middleware/auth.js';
+import { loginRateLimit, registerRateLimit } from '../middleware/authRateLimits.js';
 
 const router = Router();
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -15,7 +16,7 @@ function publicUser(user) {
   return { id: user.id, name: user.name, email: user.email };
 }
 
-router.post('/register', async (req, res, next) => {
+router.post('/register', registerRateLimit, async (req, res, next) => {
   try {
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
@@ -37,7 +38,7 @@ router.post('/register', async (req, res, next) => {
   }
 });
 
-router.post('/login', async (req, res, next) => {
+router.post('/login', loginRateLimit, async (req, res, next) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';

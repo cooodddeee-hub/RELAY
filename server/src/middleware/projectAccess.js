@@ -10,6 +10,7 @@ export async function requireProjectAccess(req,res,next){
     const project=await Project.findById(id);
     if(!project) return res.status(404).json({message:'Project not found'});
     if(!canReadProject(project,req.user._id)) return res.status(403).json({message:'You do not have access to this project'});
+    if(project.deletionState && project.deletionState !== 'active') return res.status(410).json({message:'This project is in its deletion recovery lifecycle and is temporarily unavailable.'});
     req.project=project; next();
   }catch(err){next(err);}
 }

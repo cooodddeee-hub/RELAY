@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ApiError } from '@google/genai';
 import { extractFindings, GeminiAnalysisError, CLOUDFLARE_MODEL, DEFAULT_ANALYSIS_PROVIDER } from '../src/services/gemini.js';
 import { publicAnalysisJob, safeProviderAttempts } from '../src/services/analysisJobState.js';
-import { sanitizeLogText } from '../src/utils/safeLogger.js';
+import { errorDetails, logError, sanitizeLogText } from '../src/utils/safeLogger.js';
 
 const source = { _id: 'source-test-id', originalName: 'handover.txt', extractedText: 'The team decided to ship the beta in June.' };
 const response = { text: JSON.stringify({ findings: [{ category: 'Decision', title: 'Ship the beta in June', description: 'The team chose a June beta launch.', confidence: 0.9, quote: 'The team decided to ship the beta in June.', section: 'Launch plan' }] }) };
@@ -32,6 +32,20 @@ test('configures the SDK request timeout and disables its built-in retries', asy
   assert.equal(result[0].evidence[0].verificationStatus, 'verified');
   assert.equal(result[0].evidence[0].source, source._id);
   assert.equal(result[0].evidence[0].matchedText, source.extractedText);
+});
+
+test('AI evidence preserves the pinned immutable revision and provenance locator', async () => {
+  const pinnedSource = {
+    ...source,
+    _analysisRevisionId: 'revision-immutable-1',
+    _analysisRevisionLocator: { provider: 'github', externalType: 'issue', issueNumber: 17 },
+  };
+  const result = await extractFindings(pinnedSource, {
+    primaryProvider: 'gemini', client: clientFrom([response]),
+  });
+  assert.equal(result[0].evidence[0].sourceRevision, 'revision-immutable-1');
+  assert.deepEqual(result[0].evidence[0].locator, pinnedSource._analysisRevisionLocator);
+  assert.equal(result[0].evidence[0].verificationStatus, 'verified');
 });
 
 test('analysis retains paraphrased quotes as unverified evidence with the original source association', async () => {
@@ -96,6 +110,24 @@ test('does not turn malformed provider output into findings', async () => {
   assert.equal(client.calls, 1);
 });
 
+test('rejects malformed finding field types from Gemini as a typed invalid response', async () => {
+  const malformed = { text: JSON.stringify({ findings: [
+    { category: 'Decision', title: 42, description: 'A valid description.' },
+  ] }) };
+  await assert.rejects(extractFindings(source, { primaryProvider: 'gemini', client: clientFrom([malformed]) }),
+    (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response');
+});
+
+test('rejects malformed optional field types from Cloudflare without returning partial findings', async () => {
+  const valid = { category: 'Decision', title: 'Valid', description: 'Valid description.', quote: 'The team decided to ship the beta in June.' };
+  const malformed = { category: 'Decision', title: 'Invalid', description: 'Invalid description.', confidence: 'high', quote: { text: 'fake' } };
+  await assert.rejects(extractFindings(source, {
+    primaryProvider: 'cloudflare',
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
+    cloudflareFetch: async () => ({ ok: true, status: 200, json: async () => ({ success: true, result: { response: JSON.stringify({ findings: [valid, malformed] }) } }) }),
+  }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response');
+});
+
 test('malformed Gemini output does not trigger Cloudflare fallback', async () => {
   let fallbackCalls = 0;
   await assert.rejects(extractFindings(source, {
@@ -129,6 +161,20 @@ test('sanitizes credentials and request tokens before error logging', () => {
   assert.match(safe, /REDACTED_API_KEY/);
   assert.match(safe, /REDACTED_JWT/);
   assert.match(safe, /REDACTED_MONGODB_URI/);
+});
+
+test('safe logger omits raw provider/database error messages, stacks and unapproved metadata', () => {
+  const privateText = 'private issue body Bearer token-value';
+  const error = Object.assign(new Error(privateText), { code: 'ECONNRESET' });
+  error.stack = `Error: ${privateText}`;
+  assert.deepEqual(errorDetails(error), { name: 'Error', code: 'ECONNRESET' });
+  const original = console.error; let output = '';
+  try {
+    console.error = (value) => { output = value; };
+    logError('provider.request', error, { projectId: '012345678901234567890123', body: privateText, token: 'secret' });
+  } finally { console.error = original; }
+  assert.match(output, /projectId/);
+  assert.doesNotMatch(output, /private issue|token-value|secret/);
 });
 
 function cloudflareResponse(findings = [{ category: 'Decision', title: 'Ship the beta', description: 'The source says the beta will ship in June.', confidence: 0.9, quote: 'The team decided to ship the beta in June.' }]) {
@@ -566,6 +612,71 @@ test('accepts the OpenAI-compatible Cloudflare choices response envelope', async
   assert.equal(result[0].evidence[0].verificationStatus, 'verified');
 });
 
+test('Cloudflare prompt requires findings: [] for empty, short, or unsupported GitHub commit content', async (t) => {
+  const cases = [
+    ['empty commit', ''],
+    ['very short commit', 'init'],
+  ];
+  for (const [name, text] of cases) {
+    await t.test(name, async () => {
+      let prompt = '';
+      let geminiCalls = 0;
+      const result = await extractFindings({
+        ...source, provider: 'github', externalType: 'commit', originalName: 'Commit abcdef012345', extractedText: text,
+      }, {
+        cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
+        cloudflareFetch: async (_url, request) => {
+          prompt = JSON.parse(request.body).messages[0].content;
+          return cloudflareResponse([]);
+        },
+        client: { models: { generateContent: async () => { geminiCalls += 1; return response; } } },
+      });
+      assert.deepEqual(result, []);
+      assert.match(prompt, /Evidence quotations must be exact, contiguous text copied from the source/);
+      assert.match(prompt, /Preserve original wording, casing, and punctuation exactly/);
+      assert.match(prompt, /Never paraphrase, rewrite, summarize, normalize, or invent evidence/);
+      assert.match(prompt, /If you cannot provide an exact supporting quotation, omit that finding/);
+      assert.match(prompt, /Always include the "findings" property and make its value an array/);
+      assert.match(prompt, /If the source is empty, very short, or contains no supported findings, return exactly \{"findings":\[\]\}/);
+      assert.equal(geminiCalls, 0);
+      assert.equal(result.providerAttempts[0].provider, 'cloudflare');
+    });
+  }
+});
+
+test('a non-array findings value is rejected at the findings-array stage', async () => {
+  const output = JSON.stringify({ findings: 'none' });
+  await assert.rejects(extractFindings(source, {
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => ({ ok: true, status: 200, json: async () => ({ success: true, result: { response: output } }) }),
+  }), (error) => error instanceof GeminiAnalysisError
+    && error.validationDiagnostic?.validationStage === 'findings_array'
+    && error.validationDiagnostic?.failureCode === 'missing_findings_array');
+});
+
+test('truncated Cloudflare JSON is rejected without falling back to Gemini', async () => {
+  let geminiCalls = 0;
+  await assert.rejects(extractFindings(source, {
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => ({ ok: true, status: 200, json: async () => ({ success: true, result: { response: '{"findings":[{"category":"Decision"' } }) }),
+    client: { models: { generateContent: async () => { geminiCalls += 1; return response; } } },
+  }), (error) => error instanceof GeminiAnalysisError
+    && error.validationDiagnostic?.validationStage === 'model_json'
+    && error.validationDiagnostic?.failureCode === 'invalid_json');
+  assert.equal(geminiCalls, 0);
+});
+
+test('Cloudflare choices marked finish_reason length are diagnosed as incomplete before parsing', async () => {
+  await assert.rejects(extractFindings(source, {
+    cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
+    cloudflareFetch: async () => ({ ok: true, status: 200, json: async () => ({
+      success: true, result: { choices: [{ finish_reason: 'length', message: { content: '{"summary":"cut off"}' } }] },
+    }) }),
+  }), (error) => error instanceof GeminiAnalysisError
+    && error.validationDiagnostic?.validationStage === 'provider_envelope'
+    && error.validationDiagnostic?.failureCode === 'incomplete_provider_response');
+});
+
 test('does not treat truncated reasoning-only Cloudflare output as finding content', async () => {
   const findings = [{ category: 'Decision', title: 'Ship the beta', description: 'The team chose a June beta launch.', quote: 'The team decided to ship the beta in June.' }];
   await assert.rejects(extractFindings(source, {
@@ -590,6 +701,96 @@ test('Cloudflare findings with unsupported evidence are rejected instead of acce
     cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token',
     cloudflareFetch: async () => cloudflareResponse([{ category: 'Decision', title: 'Invented fact', description: 'Not in source.', quote: 'The team selected a launch date of August.' }]),
   }), (error) => error instanceof GeminiAnalysisError && error.kind === 'invalid_response' && /verified against the source/.test(error.message));
+});
+
+test('Cloudflare case and punctuation near-matches remain invalid and do not trigger Gemini', async (t) => {
+  for (const [label, quote, expectedFlag] of [
+    ['case-only', 'the team decided to ship the beta in June.', 'caseOnlyMatch'],
+    ['punctuation-only', 'The team decided to ship the beta in June!', 'punctuationOnlyMatch'],
+  ]) {
+    await t.test(label, async () => {
+      let geminiCalls = 0;
+      await assert.rejects(extractFindings(source, {
+        cloudflareAccountId: 'test-account', cloudflareApiToken: 'test-token', cloudflareMaxRetries: 0,
+        cloudflareFetch: async () => cloudflareResponse([{ category: 'Decision', title: 'Beta decision', description: 'A proposed finding.', quote }]),
+        client: { models: { generateContent: async () => { geminiCalls += 1; return response; } } },
+      }), (error) => error instanceof GeminiAnalysisError
+        && error.kind === 'invalid_response'
+        && error.validationDiagnostic?.failureCode === 'evidence_quote_mismatch'
+        && error.validationDiagnostic?.quoteMatchDiagnostics?.[expectedFlag] === true);
+      assert.equal(geminiCalls, 0);
+    });
+  }
+});
+
+test('Cloudflare validation failures emit reason-specific safe diagnostics for every validation stage', async (t) => {
+  const privateText = 'PRIVATE SOURCE TEXT: plan-alpha';
+  const privateQuote = 'PRIVATE QUOTE: alpha decision';
+  const diagnosticSource = {
+    _id: '507f1f77bcf86cd799439011', provider: 'github', externalType: 'issue',
+    originalName: 'private-issue-title', extractedText: `${privateText} ${privateQuote}`,
+    _analysisRevisionId: '507f1f77bcf86cd799439012',
+  };
+  const validFinding = { category: 'Decision', title: 'Private finding title', description: 'Private finding description.', quote: privateQuote };
+  const cases = [
+    ['invalid_json', 'model_json', { success: true, result: { response: '{broken json' } }],
+    ['invalid_response_envelope', 'provider_envelope', { success: false, result: { response: 'private output' } }],
+    ['missing_findings_array', 'findings_array', { success: true, result: { response: JSON.stringify({ summary: 'private summary' }) } }],
+    ['invalid_finding_schema', 'finding_schema', { success: true, result: { response: JSON.stringify({ findings: [{ ...validFinding, category: 'private invalid category' }] }) } }],
+    ['missing_evidence', 'evidence_verification', { success: true, result: { response: JSON.stringify({ findings: [{ ...validFinding, quote: '' }] }) } }],
+    ['evidence_quote_mismatch', 'evidence_verification', { success: true, result: { response: JSON.stringify({ findings: [{ ...validFinding, quote: 'fabricated private quote' }] }) } }],
+    ['unsupported_evidence_reference', 'evidence_reference', { success: true, result: { response: JSON.stringify({ findings: [{ ...validFinding, sourceId: '507f1f77bcf86cd799439099' }] }) } }],
+    ['incomplete_provider_response', 'provider_envelope', { success: true, result: { response: null } }],
+  ];
+
+  for (const [failureCode, validationStage, payload] of cases) {
+    await t.test(failureCode, async () => {
+      const logs = [];
+      const originalInfo = console.info;
+      console.info = (line) => logs.push(JSON.parse(line));
+      let error;
+      try {
+        await assert.rejects(extractFindings(diagnosticSource, {
+          diagnosticContext: { sourceId: diagnosticSource._id, sourceType: 'issue', sourcePosition: 3 },
+          cloudflareAccountId: 'private-account-id', cloudflareApiToken: 'private-api-token',
+          cloudflareMaxRetries: 0,
+          cloudflareFetch: async () => ({ ok: true, status: 200, json: async () => payload }),
+          client: { models: { generateContent: async () => { throw new Error('Gemini fallback must not run for invalid output'); } } },
+        }), (caught) => {
+          error = caught;
+          return caught instanceof GeminiAnalysisError && caught.kind === 'invalid_response';
+        });
+      } finally {
+        console.info = originalInfo;
+      }
+      const event = logs.find((entry) => entry.phase === 'validationFailed');
+      assert.ok(event);
+      assert.equal(event.provider, 'cloudflare');
+      assert.equal(event.sourceType, 'issue');
+      assert.equal(event.sourcePosition, 3);
+      assert.equal(event.sourceId, diagnosticSource._id);
+      assert.equal(event.validationStage, validationStage);
+      assert.equal(event.failureCode, failureCode);
+      assert.deepEqual(error.validationDiagnostic, {
+        provider: 'cloudflare', sourceType: 'issue', sourcePosition: 3, sourceId: diagnosticSource._id,
+        validationStage, failureCode,
+        ...(failureCode === 'evidence_quote_mismatch' ? { quoteMatchDiagnostics: {
+          exactQuoteMatch: false, caseOnlyMatch: false, punctuationOnlyMatch: false, unicodeNormalizationMatch: false,
+        } } : {}),
+      });
+      const serialized = JSON.stringify(logs);
+      for (const sensitiveValue of [privateText, privateQuote, 'private-issue-title', 'Private finding title', 'private summary', 'fabricated private quote', 'private-account-id', 'private-api-token']) {
+        assert.equal(serialized.includes(sensitiveValue), false, `diagnostic leaked ${sensitiveValue}`);
+      }
+      assert.equal(serialized.includes('stack'), false);
+      if (failureCode === 'evidence_quote_mismatch') {
+        assert.equal(typeof event.quoteMatchDiagnostics?.exactQuoteMatch, 'boolean');
+        assert.equal(typeof event.quoteMatchDiagnostics?.caseOnlyMatch, 'boolean');
+        assert.equal(typeof event.quoteMatchDiagnostics?.punctuationOnlyMatch, 'boolean');
+        assert.equal(typeof event.quoteMatchDiagnostics?.unicodeNormalizationMatch, 'boolean');
+      }
+    });
+  }
 });
 
 test('both providers failing returns a safe fallback error', async () => {

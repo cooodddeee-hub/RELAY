@@ -46,7 +46,12 @@ test('editors, viewers, and non-members cannot manage project membership', () =>
 
 test('non-members cannot read; shared members and the existing owner retain access', () => {
   const query = visibleProjectsFilter(viewerId);
-  assert.deepEqual(query, { $or: [{ owner: viewerId }, { 'members.user': viewerId }] });
+  assert.deepEqual(query, {
+    $and: [
+      { $or: [{ owner: viewerId }, { 'members.user': viewerId }] },
+      { $or: [{ deletionState: 'active' }, { deletionState: { $exists: false } }, { owner: viewerId }] },
+    ],
+  });
   assert.equal(canReadProject(project(), ownerId), true);
   assert.equal(canReadProject(project(), viewerId), true);
   assert.equal(canReadProject(project(), outsiderId), false);

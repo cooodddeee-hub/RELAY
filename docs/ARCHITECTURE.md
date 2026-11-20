@@ -4,11 +4,15 @@
 
 ## Purpose
 
-RELAY turns project documents into candidate handover findings, lets authorized teammates verify and review those findings, and saves versioned reports so project knowledge can be transferred. Gemini proposes findings; people decide whether findings are approved. Those are separate steps.
+RELAY turns project documents into candidate handover findings, lets authorized teammates verify and review those findings, and saves versioned reports so project knowledge can be transferred. Cloudflare Workers AI is the primary finding proposer and Gemini is the secondary provider; strict schema and evidence checks precede saving. People review findings and confirmed contradiction candidates, and assigned approvers sign exact handover versions.
 
 ## System overview
 
-The browser client sends authenticated requests to an Express API. The API checks JWT identity and project membership, stores project and workflow data in MongoDB, stores uploaded files on its local filesystem, extracts text, and calls Google Gemini for analysis. A PDFKit service renders saved handover snapshots for download.
+## Round 3 delivery
+
+The current implementation includes GitHub App authorization and manual bounded ingestion (README, up to 50 commits and up to 100 qualifying issues), immutable `SourceRevision` provenance, explicit revision-pinned analysis, human-reviewed contradiction candidates, project reviewer/approver assignments, immutable version-specific handover signoff, and tombstone-based project deletion/recovery. The internal cleanup endpoint is authenticated by `CRON_SECRET` and scheduled by the backend Vercel configuration. These implementation claims do not verify production credentials, database migrations/indexes, registered Vercel cron, or browser end-to-end behavior.
+
+The browser client sends authenticated requests to an Express API. The API checks JWT identity and project membership, stores project/workflow records and immutable source revisions in MongoDB, and stores uploaded originals in configured private storage. It retrieves bounded GitHub repository context through a GitHub App, runs explicit revision-pinned AI analysis, and renders versioned handover snapshots with PDFKit.
 
 ```mermaid
 flowchart LR
@@ -111,7 +115,7 @@ Each review action updates the finding and creates a `ReviewHistory` record in t
 
 ## Handover snapshots, version history, and PDF download
 
-An owner or editor generates a handover. The API selects findings whose current status is `approved`, builds a report snapshot, assigns the next version, and stores the report content and finding IDs in a `Handover` document. The snapshot captures project/report content at generation time. Later review actions do not rewrite an existing version. Each report is generated with `approvalStatus: draft`; there is no endpoint that approves a report.
+An owner or editor generates a handover. The API snapshots currently approved findings and human-confirmed contradiction candidates, allocates a version, and stores immutable report content and finding IDs in a `Handover` document. Newly generated versions are `pending` when assigned signoff is enabled and `draft` for legacy projects with signoff disabled. Later review actions do not rewrite a snapshot. In assigned mode, an active assigned approver other than the creator may record one decision against that exact version; approval marks it approved, while rejection is terminal and requires a reason. A newer version does not inherit decisions, and a pending older version is computed as superseded and cannot be signed. `POST /api/handovers/:handoverId/signoffs` records the decision and `GET` on the same path returns its history.
 
 Project members can list versions or retrieve an individual handover. The PDF download route reads the saved snapshot, renders it with PDFKit, and returns `application/pdf` as an attachment. It does not rerun Gemini or regenerate the snapshot from current findings.
 
@@ -170,5 +174,5 @@ The diagram shows conceptual references; some relationships are stored as Object
 - Local file storage requires private durable storage and retention controls for production.
 - Browser tokens are stored in local storage; the app does not use HttpOnly session cookies.
 - Gemini can fail due to provider availability, quota, model configuration, or response parsing. Analysis is not guaranteed to succeed.
-- The demo workspace is illustrative, not persisted analysis. Profile editing, password recovery, notifications, project archive export, and report approval are not implemented.
+- The demo workspace is illustrative, not persisted analysis. Profile editing, password recovery, notifications, archive export, and a general-purpose audit timeline UI remain unavailable. Formal version-specific signoff and project deletion/recovery are implemented.
 - This document describes inspected code paths; it does not certify a deployed environment, live database, or provider availability.

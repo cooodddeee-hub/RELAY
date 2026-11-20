@@ -2,7 +2,7 @@ import 'dotenv/config';
 import app from './src/app.js';
 import { connectDatabase } from './src/config/database.js';
 
-const port = Number(process.env.PORT || 5000);
+const port = Number(process.env.PORT || 5001);
 const isVercel = process.env.VERCEL === '1';
 if (!isVercel) {
   if (process.env.MONGODB_URI) {

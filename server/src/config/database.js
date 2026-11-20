@@ -4,7 +4,12 @@ import mongoose from 'mongoose';
 // connection is reused directly; clearing failures lets a later invocation retry.
 const pendingConnections = new WeakMap();
 
-export async function connectDatabase({ client = mongoose, uri = process.env.MONGODB_URI, logger = console } = {}) {
+export async function connectDatabase({
+  client = mongoose,
+  uri = process.env.MONGODB_URI,
+  logger = console,
+  production = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1',
+} = {}) {
   if (typeof uri !== 'string' || !uri.trim()) {
     const error = new Error('MongoDB is not configured on the server.');
     error.code = 'DATABASE_NOT_CONFIGURED';
@@ -12,6 +17,9 @@ export async function connectDatabase({ client = mongoose, uri = process.env.MON
   }
 
   client.set('strictQuery', true);
+  // Production indexes are created and verified by explicit, target-confirmed
+  // migrations. Do not let model compilation race that controlled rollout.
+  if (production) client.set('autoIndex', false);
   if (client.connection?.readyState === 1) return client.connection;
 
   let byUri = pendingConnections.get(client);

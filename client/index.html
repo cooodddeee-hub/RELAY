@@ -40,87 +40,58 @@ body{background:#060A16;color:#E2E8F0}
 <body class="antialiased overflow-x-hidden">
 <script>window.RELAY_API_URL = (window.RELAY_API_URL || "/api");</script>
 
-<!-- AUTH OVERLAY (LOGIN) -->
-<div id="authOverlay" class="fixed inset-0 z-[100] bg-[#060A16] flex">
-  <!-- left brand panel -->
-  <div class="hidden lg:flex w-[46%] relative overflow-hidden flex-col p-10 justify-between" style="background:radial-gradient(120% 120% at 0% 0%, #1e1b4b 0%, #0A0F1E 55%, #060A16 100%)">
-    <div>
-      <div class="flex items-center gap-3">
-        <div class="w-9 h-9 rounded-xl bg-white flex items-center justify-center"><i data-lucide="zap" class="w-5 h-5 text-[#060A16]"></i></div>
-        <span class="text-white font-bold tracking-tight text-xl">RELAY</span>
-        <span class="text-xs text-white/40 font-mono border border-white/15 px-2 py-0.5 rounded-full">v2.4.1</span>
-      </div>
-      <div class="mt-16 max-w-[480px]">
-        <h1 class="font-serif text-[42px] leading-[0.95] text-white">When someone leaves,<br><span class="italic text-violet-400">their knowledge</span> doesn't.</h1>
-        <p class="text-white/60 mt-5 text-[15px] leading-relaxed">RELAY turns scattered project artifacts into structured, evidence-backed handovers. Every claim traced to source.</p>
-        <div class="mt-8 flex items-center gap-3">
-          <div class="flex -space-x-2" aria-hidden="true"><span class="w-8 h-8 rounded-full border-2 border-[#0A0F1E] bg-violet-600 grid place-items-center text-[10px] text-white">R</span><span class="w-8 h-8 rounded-full border-2 border-[#0A0F1E] bg-sky-600 grid place-items-center text-[10px] text-white">E</span><span class="w-8 h-8 rounded-full border-2 border-[#0A0F1E] bg-amber-600 grid place-items-center text-[10px] text-white">L</span></div>
-          <span class="text-xs text-white/50">A clearer handover for every team.</span>
-        </div>
-      </div>
-      <!-- workflow preview card -->
-      <div class="mt-10 glass rounded-2xl p-5 max-w-[460px]">
-        <div class="flex items-center justify-between text-[10px] font-mono tracking-widest text-white/40 mb-4">WORKFLOW <span class="text-violet-300">SAMPLE PREVIEW</span></div>
-        <div class="flex items-center gap-2">
-          <div class="flex-1 text-center"><div class="w-9 h-9 rounded-xl bg-violet-600 flex items-center justify-center mx-auto"><i data-lucide="link-2" class="w-4 h-4 text-white"></i></div><p class="text-[11px] text-white mt-2 font-medium">Connect</p><p class="text-[10px] text-white/40">Sources</p></div>
-          <div class="flex-1 h-px bg-white/15 relative"><div class="absolute inset-0 workflow-line opacity-60"></div></div>
-          <div class="flex-1 text-center"><div class="w-9 h-9 rounded-xl bg-sky-500 flex items-center justify-center mx-auto"><i data-lucide="scan-search" class="w-4 h-4 text-white"></i></div><p class="text-[11px] text-white mt-2">Reconstruct</p></div>
-          <div class="flex-1 h-px bg-white/15"></div>
-          <div class="flex-1 text-center"><div class="w-9 h-9 rounded-xl bg-amber-500 flex items-center justify-center mx-auto"><i data-lucide="shield-check" class="w-4 h-4 text-white"></i></div><p class="text-[11px] text-white mt-2">Verify</p></div>
-          <div class="flex-1 h-px bg-white/15"></div>
-          <div class="flex-1 text-center"><div class="w-9 h-9 rounded-xl bg-white/15 flex items-center justify-center mx-auto"><i data-lucide="file-check-2" class="w-4 h-4 text-white"></i></div><p class="text-[11px] text-white mt-2">Handover</p></div>
-        </div>
-        <div class="mt-4 grid grid-cols-3 gap-2">
-          <div class="bg-white/[0.06] rounded-xl p-3"><p class="text-[10px] text-white/40 font-mono">FINDINGS</p><p class="text-white font-bold text-lg">47 <span class="text-emerald-400 text-xs font-normal">+12</span></p></div>
-          <div class="bg-white/[0.06] rounded-xl p-3"><p class="text-[10px] text-white/40 font-mono">EVIDENCE</p><p class="text-white font-bold text-lg">128 links</p></div>
-          <div class="bg-white/[0.06] rounded-xl p-3"><p class="text-[10px] text-white/40 font-mono">CONFIDENCE</p><p class="text-white font-bold text-lg">94%</p></div>
-        </div>
-      </div>
-    </div>
-    <p class="text-[11px] text-white/30 font-mono">RELAY · PROJECT KNOWLEDGE HANDOVER · AI-ASSISTED</p>
-    <div class="absolute -right-24 -bottom-24 w-[400px] h-[400px] rounded-full blur-[80px] opacity-20" style="background:radial-gradient(circle,#7C5CFC,transparent 70%)"></div>
+<!-- WELCOME SPLASH · visible only while startup session routing resolves -->
+<div id="welcomeSplash" class="welcome-splash" role="status" aria-live="polite" aria-busy="true">
+  <div class="splash-orbit splash-orbit-one" aria-hidden="true"></div><div class="splash-orbit splash-orbit-two" aria-hidden="true"></div>
+  <div class="splash-content">
+    <div class="splash-logo" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M24 5 42 37H6L24 5Z"/><path d="m16 28 8-14 8 14M12 34h24"/><circle cx="24" cy="5" r="2.4"/><circle cx="6" cy="37" r="2.4"/><circle cx="42" cy="37" r="2.4"/></svg></div>
+    <p class="splash-wordmark">RELAY</p>
+    <p class="splash-kicker">PROJECT KNOWLEDGE, CONNECTED</p>
+    <h1>Welcome, <span>Code Pune Thinkers.</span></h1>
+    <p class="splash-tagline">Connecting ideas. Reconstructing knowledge. Building trust.</p>
+    <div class="splash-loader" aria-hidden="true"><span></span><span></span><span></span></div>
+    <p id="startupStatus" class="splash-status">Preparing your workspace…</p>
   </div>
-  <!-- right login -->
-  <div class="flex-1 flex items-center justify-center p-6 bg-[#050914] relative">
-    <div class="w-full max-w-[400px]">
-      <div class="lg:hidden flex items-center gap-3 mb-8">
-        <div class="w-9 h-9 rounded-xl bg-white flex items-center justify-center"><i data-lucide="zap" class="w-5 h-5 text-[#060A16]"></i></div>
-        <span class="text-white font-bold text-xl">RELAY</span>
-      </div>
-      <h2 class="text-white text-[26px] font-semibold">Welcome back</h2>
-      <p class="text-white/50 text-sm mt-1">Sign in to your workspace to continue.</p>
+  <div class="splash-network" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+</div>
 
-      <form id="authForm" class="mt-6 space-y-4">
-        <div id="registerNameField" class="hidden"><label class="text-xs text-white/60 font-medium" for="authName">Name</label><input id="authName" type="text" autocomplete="name" maxlength="100" class="mt-1.5 w-full bg-[#0F1832] border border-white/10 rounded-xl px-3 py-3 text-sm text-white focus:outline-none focus:border-violet-500/50" placeholder="Your name"></div>
-        <div>
-          <label class="text-xs text-white/60 font-medium">Work email</label>
-          <div class="mt-1.5 relative">
-            <i data-lucide="mail" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-white/30"></i>
-            <input id="authEmail" type="email" autocomplete="email" required class="w-full bg-[#0F1832] border border-white/10 rounded-xl pl-10 pr-3 py-3 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-violet-500/50" placeholder="you@company.com">
-          </div>
-        </div>
-        <div>
-          <label class="text-xs text-white/60 font-medium">Password</label>
-          <div class="mt-1.5 relative">
-            <i data-lucide="lock" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-white/30"></i>
-            <input id="authPass" type="password" autocomplete="current-password" required class="w-full bg-[#0F1832] border border-white/10 rounded-xl pl-10 pr-10 py-3 text-sm text-white focus:outline-none focus:border-violet-500/50">
-            <button type="button" onclick="togglePass()" class="absolute right-3 top-1/2 -translate-y-1/2"><i data-lucide="eye" class="w-4 h-4 text-white/30"></i></button>
-          </div>
-          <div class="flex justify-between mt-2">
-            <span class="text-xs text-white/40">Session lasts up to 12 hours</span>
-            <span class="text-xs text-white/35">Password recovery · Coming soon</span>
-          </div>
-        </div>
-        <button type="submit" id="loginBtn" class="w-full bg-white text-[#060A16] font-semibold py-3 rounded-xl hover:bg-white/90 transition flex items-center justify-center gap-2">Sign in <i data-lucide="arrow-right" class="w-4 h-4"></i></button>
-        <p class="text-center text-xs text-white/40"><span id="authSwitchText">No account?</span> <button type="button" id="authSwitch" onclick="toggleAuthMode()" class="text-violet-400">Create account</button></p>
-      </form>
-      <p id="authError" class="hidden mt-4 text-sm text-red-300" role="alert"></p>
-      <div class="mt-5 border-t border-white/10 pt-5 text-center">
-        <p class="text-xs text-white/40 mb-3">Want to explore first?</p>
-        <button type="button" onclick="enterDemo()" class="w-full glass rounded-xl py-3 text-sm text-white hover:border-violet-400/50 transition">Explore Campus Connect Demo <span class="ml-1 text-[10px] text-violet-300 font-mono">DEMO DATA</span></button>
-      </div>
+<!-- PREMIUM AUTH EXPERIENCE -->
+<div id="authOverlay" class="auth-overlay">
+  <section class="auth-brand-panel" aria-labelledby="authBrandHeadline">
+    <div class="auth-brand-top"><div class="auth-brand-mark"><i data-lucide="radio-tower" aria-hidden="true"></i></div><span class="auth-wordmark">RELAY<span>.</span><small>PROJECT INTELLIGENCE</small></span><span class="auth-secure-label"><i data-lucide="shield-check" aria-hidden="true"></i> Evidence first</span></div>
+    <div class="auth-brand-copy"><p class="auth-eyebrow"><span></span> From scattered signals to shared understanding</p><h1 id="authBrandHeadline">Turn project knowledge into <em>trusted decisions.</em></h1><p class="auth-description">Bring documents and repository history together. RELAY helps teams reconstruct context, verify evidence, and carry decisions forward.</p><div class="auth-mobile-flow"><span>Sources</span><i></i><span>AI insight</span><i></i><span>Review</span><i></i><span>Handover</span></div></div>
+    <div id="authWorkflowScene" class="auth-workflow-scene" aria-hidden="true">
+      <div class="scene-grid"></div>
+      <svg class="scene-connections" viewBox="0 0 800 360" preserveAspectRatio="none"><path d="M95 190 C205 175 190 95 300 104 S425 245 525 181 625 98 705 115"/><path d="M95 190 C215 258 215 292 340 264 S425 245 525 181 635 238 705 246"/><path d="M300 104 C390 90 427 166 525 181"/><path d="M340 264 C438 300 446 216 525 181"/></svg>
+      <span class="scene-node node-source"><i data-lucide="files"></i></span><span class="scene-node node-ai"><i data-lucide="sparkles"></i></span><span class="scene-node node-review"><i data-lucide="shield-check"></i></span><span class="scene-node node-report"><i data-lucide="file-check-2"></i></span><span class="scene-node node-orbit"><i data-lucide="git-branch"></i></span>
+      <article class="scene-card scene-card-source"><span class="scene-card-icon source-icon"><i data-lucide="layers-3"></i></span><div><small>01 · INPUT</small><strong>Sources</strong><p>Documents & GitHub</p></div></article>
+      <article class="scene-card scene-card-ai"><span class="scene-card-icon ai-icon"><i data-lucide="sparkles"></i></span><div><small>02 · RECONSTRUCT</small><strong>AI intelligence</strong><p>Claims linked to evidence</p></div></article>
+      <article class="scene-card scene-card-review"><span class="scene-card-icon review-icon"><i data-lucide="scan-eye"></i></span><div><small>03 · VERIFY</small><strong>Human review</strong><p>Decisions stay accountable</p></div></article>
+      <article class="scene-card scene-card-report"><span class="scene-card-icon report-icon"><i data-lucide="file-check-2"></i></span><div><small>04 · SHARE</small><strong>Handover</strong><p>Versioned project memory</p></div></article>
+      <div class="scene-caption"><span class="scene-caption-pulse"></span> A clear path from evidence to action</div>
     </div>
-  </div>
+    <footer class="auth-brand-footer"><span>RELAY <b>·</b> Connecting knowledge across team transitions</span><span class="auth-footer-mark">R / 01</span></footer>
+  </section>
+
+  <section class="auth-form-panel" aria-label="Sign in to RELAY">
+    <div class="auth-form-wrap">
+      <div class="auth-mobile-brand"><div class="auth-brand-mark"><i data-lucide="radio-tower" aria-hidden="true"></i></div><span class="auth-wordmark">RELAY<span>.</span></span></div>
+      <div class="auth-card">
+        <div class="auth-card-heading"><p class="auth-eyebrow">YOUR WORKSPACE AWAITS</p><h2 id="authHeading">Welcome back</h2><p id="authIntro">Sign in to continue where your team left off.</p></div>
+        <form id="authForm" class="auth-form">
+          <div id="registerNameField" class="hidden auth-field"><label for="authName">Full name</label><div class="auth-input-wrap"><i data-lucide="user-round" aria-hidden="true"></i><input id="authName" type="text" autocomplete="name" maxlength="100" placeholder="Your name"></div></div>
+          <div class="auth-field"><label for="authEmail">Work email</label><div class="auth-input-wrap"><i data-lucide="mail" aria-hidden="true"></i><input id="authEmail" type="email" autocomplete="email" required placeholder="you@company.com"></div></div>
+          <div class="auth-field"><label for="authPass">Password</label><div class="auth-input-wrap"><i data-lucide="lock-keyhole" aria-hidden="true"></i><input id="authPass" type="password" autocomplete="current-password" required><button id="togglePassButton" type="button" onclick="togglePass()" aria-label="Show password" aria-pressed="false"><i data-lucide="eye" aria-hidden="true"></i></button></div><p class="auth-field-hint">Your session is protected and lasts up to 12 hours.</p></div>
+          <button type="submit" id="loginBtn" class="auth-submit"><span id="loginBtnLabel">Sign in</span><i data-lucide="arrow-right" aria-hidden="true"></i></button>
+          <p id="authError" class="auth-error hidden" role="alert" aria-live="assertive"></p>
+          <p class="auth-switch"><span id="authSwitchText">New to RELAY?</span> <button type="button" id="authSwitch" onclick="toggleAuthMode()">Create an account</button></p>
+        </form>
+        <div class="auth-demo-divider"><span>OR</span></div>
+        <button type="button" onclick="enterDemo()" class="auth-demo"><i data-lucide="play" aria-hidden="true"></i><span><strong>Explore the demo workspace</strong><small>Sample Campus Connect project · no data is saved</small></span><i data-lucide="arrow-up-right" aria-hidden="true"></i></button>
+      </div>
+      <p class="auth-legal"><i data-lucide="lock-keyhole" aria-hidden="true"></i> Secure sign-in · Your project data remains private</p>
+    </div>
+  </section>
 </div>
 
 <!-- APP SHELL -->
@@ -133,55 +104,45 @@ body{background:#060A16;color:#E2E8F0}
   <aside id="sidebar" class="fixed top-0 left-0 bottom-0 w-[260px] bg-[#0A0F1E] border-r border-white/[0.07] flex flex-col z-40 transition-transform duration-300 lg:translate-x-0 -translate-x-full">
     <div class="p-5">
       <div class="flex items-center gap-3">
-        <div class="w-8 h-8 rounded-lg bg-white flex items-center justify-center"><i data-lucide="zap" class="w-4 h-4 text-[#060A16]"></i></div>
-        <span class="text-white font-bold tracking-tight">RELAY</span>
-        <span class="ml-auto text-[10px] font-mono bg-violet-600 text-white px-2 py-0.5 rounded-full">MVP</span>
+        <div class="relay-mark w-9 h-9 rounded-xl flex items-center justify-center"><i data-lucide="radio-tower" class="w-4 h-4 text-white"></i></div>
+        <span class="relay-wordmark text-white font-bold tracking-tight">RELAY<span class="text-indigo-300">.</span><small class="block text-[9px] font-medium tracking-[.18em] text-white/40">PROJECT INTELLIGENCE</small></span>
+        <button id="desktopSidebarToggle" type="button" onclick="toggleDesktopSidebar()" aria-label="Collapse sidebar" aria-expanded="true" class="sidebar-collapse-button ml-auto hidden lg:grid w-8 h-8 place-items-center rounded-lg text-white/45 hover:bg-white/10 hover:text-white"><i data-lucide="panel-left-close" class="w-4 h-4"></i></button>
       </div>
       <!-- project selector -->
       <select id="projectSelect" onchange="selectProject(this.value)" aria-label="Selected project" class="mt-5 w-full bg-[#111B34] border border-white/10 rounded-xl p-3 text-white text-sm"><option value="">Loading projects…</option></select>
-      <div class="mt-3 bg-[#111B34]/80 border border-white/5 rounded-xl p-3"><p class="text-[11px] font-mono tracking-widest text-white/40">SELECTED WORKSPACE</p><p id="workspaceSelectedProject" class="text-sm text-white mt-2 truncate">Choose a project</p><p id="workspaceAccount" class="text-[11px] text-white/40 mt-1 truncate">Signed-in account</p></div>
+          <div class="workspace-card mt-3 bg-[#111B34]/80 border border-white/5 rounded-xl p-3"><p class="text-[10px] font-mono tracking-widest text-white/40">SELECTED WORKSPACE</p><p id="workspaceSelectedProject" class="text-sm text-white mt-2 truncate">Choose a project</p><p id="workspaceAccount" class="text-[11px] text-white/40 mt-1 truncate">Signed-in account</p></div>
     </div>
     <nav class="flex-1 px-3 space-y-1 overflow-y-auto">
-      <button onclick="navigate('dashboard')" data-nav="dashboard" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-white text-[#060A16] font-medium text-sm"><i data-lucide="layout-dashboard" class="w-4 h-4"></i> Dashboard <span class="ml-auto bg-[#060A16] text-white text-[11px] px-1.5 py-0.5 rounded-full">3</span></button>
-      <button onclick="navigate('projects')" data-nav="projects" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="folder-kanban" class="w-4 h-4"></i> Projects <span class="ml-auto text-xs text-white/40">4</span></button>
-      <button onclick="navigate('sources')" data-nav="sources" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="files" class="w-4 h-4"></i> Sources <span class="ml-auto bg-amber-500 text-white text-[11px] px-1.5 py-0.5 rounded-full">2</span></button>
-      <button onclick="navigate('findings')" data-nav="findings" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="sparkles" class="w-4 h-4"></i> AI Findings <span class="ml-auto bg-violet-600 text-white text-[11px] px-1.5 py-0.5 rounded-full">47</span></button>
-      <button onclick="navigate('review')" data-nav="review" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="clipboard-check" class="w-4 h-4"></i> Review & Approval <span class="ml-auto bg-sky-500 text-white text-[11px] px-1.5 py-0.5 rounded-full">0</span></button>
-      <button onclick="navigate('handover')" data-nav="handover" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="file-text" class="w-4 h-4"></i> Handover Reports</button>
-      <button onclick="navigate('settings')" data-nav="settings" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="settings-2" class="w-4 h-4"></i> Settings</button>
+      <p class="sidebar-section-label px-3 pb-2 text-[9px] font-semibold uppercase tracking-[.18em] text-white/30">Workspace</p>
+      <button onclick="navigate('dashboard')" data-nav="dashboard" title="Dashboard" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-white text-[#060A16] font-medium text-sm"><i data-lucide="layout-dashboard" class="w-4 h-4 shrink-0"></i><span class="nav-label">Dashboard</span><span class="nav-count ml-auto text-[11px] px-1.5 py-0.5 rounded-full"></span></button>
+      <button onclick="navigate('projects')" data-nav="projects" title="Projects" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="folder-kanban" class="w-4 h-4 shrink-0"></i><span class="nav-label">Projects</span><span class="nav-count ml-auto text-xs text-white/40"></span></button>
+      <button onclick="navigate('sources')" data-nav="sources" title="Sources" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="files" class="w-4 h-4 shrink-0"></i><span class="nav-label">Sources</span><span class="nav-count ml-auto text-xs"></span></button>
+      <button onclick="navigate('findings')" data-nav="findings" title="AI Findings" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="sparkles" class="w-4 h-4 shrink-0"></i><span class="nav-label">AI Findings</span><span class="nav-count ml-auto text-xs"></span></button>
+      <button onclick="navigate('review')" data-nav="review" title="Review & Approval" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="clipboard-check" class="w-4 h-4 shrink-0"></i><span class="nav-label">Review & Approval</span><span class="nav-count ml-auto text-xs"></span></button>
+      <button onclick="navigate('handover')" data-nav="handover" title="Handover Reports" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="file-text" class="w-4 h-4 shrink-0"></i><span class="nav-label">Handover Reports</span></button>
+      <button onclick="navigate('settings')" data-nav="settings" title="Settings" class="nav-btn w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-white/70 hover:bg-white/5 text-sm"><i data-lucide="settings-2" class="w-4 h-4 shrink-0"></i><span class="nav-label">Settings</span></button>
     </nav>
     <div class="p-3">
-      <div class="bg-gradient-to-br from-violet-600/80 to-sky-500/70 rounded-2xl p-4 text-white"><p class="text-sm font-semibold leading-tight">Knowledge that moves with the work</p><p class="text-xs text-white/80 mt-1">Bring evidence, decisions, and next steps together.</p></div>
-      <div class="mt-3 flex items-center gap-3 px-2 py-2">
-        <span id="userAvatar" class="w-8 h-8 rounded-full bg-violet-600 text-white grid place-items-center text-sm font-semibold">U</span>
-        <div class="flex-1 min-w-0"><p id="userName" class="text-white text-sm font-medium leading-none truncate">Account</p><p class="text-white/40 text-xs">RELAY account</p></div>
-        <button onclick="logout()" class="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center"><i data-lucide="log-out" class="w-4 h-4 text-white/70"></i></button>
+      <div class="sidebar-promo bg-gradient-to-br from-violet-600/80 to-sky-500/70 rounded-2xl p-4 text-white"><p class="text-sm font-semibold leading-tight">Knowledge that moves with the work</p><p class="text-xs text-white/80 mt-1">Bring evidence, decisions, and next steps together.</p></div>
+      <div class="profile-row mt-3 flex items-center gap-3 px-2 py-2 border-t border-white/10 pt-4">
+        <span id="userAvatar" class="w-9 h-9 rounded-xl bg-indigo-500 text-white grid place-items-center text-sm font-semibold">U</span>
+        <div class="profile-copy flex-1 min-w-0"><p id="userName" class="text-white text-sm font-medium leading-none truncate">Account</p><p class="text-white/40 text-xs">RELAY workspace</p></div>
+        <button onclick="logout()" aria-label="Sign out" class="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center"><i data-lucide="log-out" class="w-4 h-4 text-white/70"></i></button>
       </div>
     </div>
   </aside>
+  <button id="sidebarBackdrop" type="button" class="fixed inset-0 z-30 hidden bg-slate-950/40 backdrop-blur-[1px] lg:hidden" aria-label="Close navigation" onclick="toggleSidebar()"></button>
 
   <!-- MAIN -->
-  <div class="lg:pl-[260px] min-h-screen flex flex-col">
+  <div id="mainShell" class="lg:pl-[260px] min-h-screen flex flex-col">
     <!-- topbar -->
     <header class="sticky top-0 z-30 bg-[#060A16]/80 backdrop-blur-xl border-b border-white/[0.07]">
-      <div class="flex items-center gap-3 px-4 lg:px-6 py-3">
-        <button onclick="toggleSidebar()" class="lg:hidden w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center"><i data-lucide="menu" class="w-5 h-5 text-white"></i></button>
-        <!-- workflow pill centered -->
-        <div class="hidden md:flex items-center gap-1 bg-[#111B34] border border-white/10 rounded-full p-1">
-          <span class="px-3 py-1.5 rounded-full bg-violet-600 text-white text-xs font-medium flex items-center gap-1.5"><span class="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[11px]">1</span> Connect</span>
-          <i data-lucide="chevron-right" class="w-3 h-3 text-white/30"></i>
-          <span class="px-3 py-1.5 rounded-full bg-sky-500 text-white text-xs font-medium flex items-center gap-1.5"><span class="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[11px]">2</span> Reconstruct</span>
-          <i data-lucide="chevron-right" class="w-3 h-3 text-white/30"></i>
-          <span class="px-3 py-1.5 rounded-full bg-amber-500 text-white text-xs font-medium flex items-center gap-1.5"><span class="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-[11px]">3</span> Verify</span>
-          <i data-lucide="chevron-right" class="w-3 h-3 text-white/30"></i>
-          <span class="px-3 py-1.5 rounded-full bg-white/10 text-white/60 text-xs flex items-center gap-1.5"><span class="w-5 h-5 rounded-full bg-white/10 flex items-center justify-center text-[11px]">4</span> Review</span>
-          <i data-lucide="chevron-right" class="w-3 h-3 text-white/30"></i>
-          <span class="px-3 py-1.5 rounded-full bg-white text-[#060A16] text-xs font-medium">5 Handover</span>
-        </div>
+      <div class="flex items-center gap-3 px-4 lg:px-8 py-3.5">
+        <button onclick="toggleSidebar()" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false" id="mobileNavToggle" class="lg:hidden w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-700"><i data-lucide="menu" class="w-5 h-5"></i></button>
+        <div class="premium-breadcrumb min-w-0"><p id="topbarBreadcrumb" class="text-[11px] font-medium text-slate-400">Workspace / Overview</p><h2 id="topbarTitle" class="text-[15px] font-semibold text-slate-800 leading-tight mt-0.5">Dashboard</h2><p id="topbarDescription" class="hidden lg:block text-xs text-slate-500 mt-0.5">Your project intelligence at a glance.</p></div>
         <div class="flex-1"></div>
-        <div class="hidden sm:flex items-center gap-2 text-xs text-white/50"><span class="w-2 h-2 bg-emerald-500 rounded-full"></span> RELAY workspace</div>
-        <div class="relative"><i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-white/30"></i><input id="globalSearch" aria-label="Search findings" placeholder="Search findings, evidence…" class="bg-[#111B34] border border-white/10 rounded-full pl-9 pr-4 py-2 text-sm text-white placeholder:text-white/30 w-[200px] lg:w-[260px] focus:outline-none focus:border-violet-500/30"></div>
-        <button type="button" disabled title="Notifications · Coming soon" aria-label="Notifications coming soon" class="relative w-9 h-9 rounded-full bg-[#111B34] border border-white/10 flex items-center justify-center opacity-50 cursor-not-allowed"><i data-lucide="bell" class="w-4 h-4 text-white/70"></i></button>
+        <div class="relative hidden sm:block"><i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i><input id="globalSearch" aria-label="Search findings" placeholder="Search findings, evidence…" class="bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-sm text-slate-700 placeholder:text-slate-400 w-[190px] lg:w-[240px] focus:outline-none focus:border-indigo-300"></div>
+        <button type="button" onclick="navigate('settings')" aria-label="Open account settings" class="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100 flex items-center justify-center font-semibold text-sm"><span id="topbarAvatar">U</span></button>
       </div>
     </header>
 
@@ -192,8 +153,8 @@ body{background:#060A16;color:#E2E8F0}
       <section id="view-dashboard" class="space-y-6 fade-in">
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 class="text-[28px] font-serif text-white leading-none">Good morning, <span id="greetName">Sarah</span> <span class="inline-block">👋</span></h1>
-            <p id="dashboardSummary" class="text-white/50 text-sm mt-2 max-w-[620px]">Loading your project workspace…</p>
+            <div class="dashboard-hero-copy"><p class="premium-eyebrow mb-2">Your RELAY workspace</p><h1 class="text-[28px] font-serif text-white leading-none">Good to see you, <span id="greetName">there</span></h1>
+            <p id="dashboardSummary" class="text-white/50 text-sm mt-2 max-w-[620px]">Loading your project workspace…</p></div>
           </div>
           <div class="flex gap-2">
             <button id="analyzeTopButton" onclick="simulateAnalyze()" class="bg-white text-[#060A16] font-semibold px-4 py-2.5 rounded-full text-sm flex items-center gap-2"><i data-lucide="sparkles" class="w-4 h-4"></i><span>Analyze New Sources</span></button>
@@ -202,7 +163,7 @@ body{background:#060A16;color:#E2E8F0}
         </div>
 
         <!-- KPI cards -->
-        <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
+        <div class="dashboard-kpis grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
           <div class="glass rounded-2xl p-4 card-hover">
             <div class="flex justify-between items-start"><p class="text-[11px] tracking-widest text-white/40 font-mono">ACTIVE PROJECTS</p><div class="w-8 h-8 rounded-xl bg-violet-600 flex items-center justify-center"><i data-lucide="folder" class="w-4 h-4 text-white"></i></div></div>
             <p id="dashboardProjectCount" class="text-3xl font-bold text-white mt-3">—</p><p class="text-xs text-white/40">Projects in your account</p>
@@ -211,12 +172,12 @@ body{background:#060A16;color:#E2E8F0}
           <div class="glass rounded-2xl p-4 card-hover">
             <div class="flex justify-between"><p class="text-[11px] tracking-widest text-white/40 font-mono">CONNECTED SOURCES</p><div class="w-8 h-8 rounded-xl bg-sky-500 flex items-center justify-center"><i data-lucide="database" class="w-4 h-4 text-white"></i></div></div>
             <p id="dashboardSourceCount" class="text-3xl font-bold text-white mt-3">—</p><p class="text-xs text-violet-400">Sources in selected project</p>
-            <div class="mt-3 h-1.5 bg-white/10 rounded-full"><div class="h-full w-[84%] bg-sky-500 rounded-full"></div></div>
+          <div class="dashboard-source-progress-track mt-3 h-1.5 bg-white/10 rounded-full overflow-hidden"><div class="dashboard-source-progress h-full w-0 bg-sky-500 rounded-full transition-all" aria-hidden="true"></div></div>
           </div>
           <div class="glass rounded-2xl p-4 card-hover">
             <div class="flex justify-between"><p class="text-[11px] tracking-widest text-white/40 font-mono">AI FINDINGS</p><div class="w-8 h-8 rounded-xl bg-white flex items-center justify-center"><i data-lucide="brain" class="w-4 h-4 text-[#060A16]"></i></div></div>
             <p id="dashboardFindingCount" class="text-3xl font-bold text-white mt-3">—</p><p id="dashboardPendingCount" class="text-xs text-white/40">Findings in selected project</p>
-            <div class="mt-3 flex gap-2 text-[11px]"><span id="dashboardApprovedCount" class="text-emerald-400">0 approved</span></div>
+            <div class="mt-3 flex gap-2 text-[11px]"><span id="dashboardApprovedCount" class="text-emerald-400">—</span></div>
           </div>
           <div class="glass rounded-2xl p-4 card-hover hidden lg:block">
             <p class="text-[11px] tracking-widest text-white/40 font-mono">HANDOVER READINESS</p>
@@ -228,21 +189,28 @@ body{background:#060A16;color:#E2E8F0}
           </div>
         </div>
 
+        <section class="dashboard-quick-actions grid grid-cols-2 lg:grid-cols-4 gap-3" aria-label="Workspace shortcuts">
+          <button type="button" onclick="navigate('sources')" class="quick-action"><span class="quick-action-icon"><i data-lucide="upload-cloud" class="w-4 h-4"></i></span><span><strong>Add source</strong><small>Upload or connect GitHub</small></span><i data-lucide="arrow-up-right" class="quick-action-arrow w-4 h-4"></i></button>
+          <button type="button" onclick="navigate('findings')" class="quick-action"><span class="quick-action-icon"><i data-lucide="sparkles" class="w-4 h-4"></i></span><span><strong>Run analysis</strong><small>Choose sources explicitly</small></span><i data-lucide="arrow-up-right" class="quick-action-arrow w-4 h-4"></i></button>
+          <button type="button" onclick="navigate('review')" class="quick-action"><span class="quick-action-icon"><i data-lucide="list-checks" class="w-4 h-4"></i></span><span><strong>Review queue</strong><small>Verify findings and conflicts</small></span><i data-lucide="arrow-up-right" class="quick-action-arrow w-4 h-4"></i></button>
+          <button type="button" onclick="navigate('handover')" class="quick-action"><span class="quick-action-icon"><i data-lucide="files" class="w-4 h-4"></i></span><span><strong>Handover reports</strong><small>Browse saved versions</small></span><i data-lucide="arrow-up-right" class="quick-action-arrow w-4 h-4"></i></button>
+        </section>
+
         <!-- middle row -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div class="lg:col-span-2 glass rounded-2xl p-5">
             <div class="flex items-center justify-between"><h3 class="text-white font-semibold">Extraction Progress</h3><span class="text-xs bg-white/10 text-white/50 px-2.5 py-1 rounded-full">Selected project status</span></div>
             <div id="dashboardProgress" class="mt-4 space-y-4"><p class="text-sm text-white/45">Select a project to see source and finding status.</p></div>
             <div class="mt-5 grid grid-cols-3 gap-3">
-              <div class="bg-white/[0.06] rounded-xl p-3"><p id="dashboardExtractedCount" class="text-white font-bold text-lg">0</p><p class="text-[11px] text-white/40">Findings extracted</p></div>
-              <div class="bg-white/[0.06] rounded-xl p-3"><p id="dashboardEvidenceCount" class="text-white font-bold text-lg">0</p><p class="text-[11px] text-white/40">Evidence links</p></div>
+              <div class="bg-white/[0.06] rounded-xl p-3"><p id="dashboardExtractedCount" class="text-white font-bold text-lg">—</p><p class="text-[11px] text-white/40">Findings extracted</p></div>
+              <div class="bg-white/[0.06] rounded-xl p-3"><p id="dashboardEvidenceCount" class="text-white font-bold text-lg">—</p><p class="text-[11px] text-white/40">Evidence links</p></div>
               <div class="bg-white/[0.06] rounded-xl p-3"><p id="dashboardConfidence" class="text-white font-bold text-lg">—</p><p class="text-[11px] text-white/40">Avg confidence</p></div>
             </div>
           </div>
           <div class="glass rounded-2xl p-5">
             <h3 class="text-white font-semibold">Recent Activity</h3>
             <div id="recentActivity" class="mt-4 space-y-3"><p class="text-sm text-white/45">Activity will appear as you add project sources.</p></div>
-            <button type="button" disabled title="Activity history · Coming soon" class="mt-4 w-full bg-white/5 border border-white/10 rounded-xl py-2 text-sm text-white/40 cursor-not-allowed">Activity history · Coming soon</button>
+            <p class="mt-4 text-xs text-white/35">Showing recent source activity for the selected project.</p>
           </div>
         </div>
 
@@ -252,7 +220,7 @@ body{background:#060A16;color:#E2E8F0}
             <div class="flex items-center justify-between"><h3 class="text-white font-semibold">Pending Approvals</h3><button onclick="navigate('review')" class="text-xs text-violet-400">View queue →</button></div>
             <div class="mt-4 space-y-3" id="pendingList"></div>
           </div>
-          <div class="glass rounded-2xl p-5"><h3 class="text-white font-semibold">Workspace snapshot</h3><p id="dashboardCurrentProject" class="mt-3 text-sm text-white/70">Loading your project…</p><p id="dashboardAccount" class="mt-2 text-xs text-white/40"></p><p class="mt-4 text-xs text-white/35">People and ownership views · Coming soon</p></div>
+          <div class="glass rounded-2xl p-5"><h3 class="text-white font-semibold">Recent handovers</h3><div id="dashboardRecentHandovers" class="mt-3 space-y-2" aria-live="polite"><p class="text-sm text-white/45">Select a project to view saved versions.</p></div><p id="dashboardAccount" class="mt-4 text-xs text-white/40"></p></div>
         </div>
       </section>
 
@@ -271,16 +239,17 @@ body{background:#060A16;color:#E2E8F0}
         <div id="projectDetail" class="hidden glass rounded-2xl overflow-hidden">
           <div class="p-5 border-b border-white/10 flex flex-wrap items-center justify-between gap-3">
             <div><h3 id="detailTitle" class="text-white font-semibold text-lg">Selected project</h3><p id="detailDesc" class="text-white/50 text-sm">Choose a project to view its details.</p></div>
-            <div class="flex gap-2"><button type="button" disabled title="Project editing · Coming soon" class="bg-white/10 text-white/45 px-4 py-2 rounded-full text-sm cursor-not-allowed">Edit · Soon</button><button type="button" disabled title="Project archiving · Coming soon" class="bg-red-500/40 text-white/50 px-4 py-2 rounded-full text-sm cursor-not-allowed">Archive · Soon</button></div>
+            <span class="text-xs text-white/40">Project overview</span>
           </div>
-          <div class="flex gap-1 p-2 border-b border-white/10 overflow-x-auto">
-            <button onclick="switchProjectTab('overview')" data-ptab="overview" class="ptab bg-white text-[#060A16] px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap">Overview</button>
-            <button onclick="switchProjectTab('sources')" data-ptab="sources" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Sources (8)</button>
-            <button onclick="switchProjectTab('findings')" data-ptab="findings" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Findings (47)</button>
-            <button onclick="switchProjectTab('team')" data-ptab="team" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Team</button>
-            <button onclick="switchProjectTab('handover')" data-ptab="handover" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Handover</button>
+          <div role="tablist" aria-label="Project workspace sections" class="flex gap-1 p-2 border-b border-white/10 overflow-x-auto">
+            <button role="tab" aria-selected="true" onclick="switchProjectTab('overview')" data-ptab="overview" class="ptab bg-white text-[#060A16] px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap">Overview</button>
+            <button role="tab" aria-selected="false" onclick="switchProjectTab('sources')" data-ptab="sources" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Sources</button>
+            <button role="tab" aria-selected="false" onclick="switchProjectTab('findings')" data-ptab="findings" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">AI Findings</button>
+            <button role="tab" aria-selected="false" onclick="switchProjectTab('contradictions')" data-ptab="contradictions" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Contradictions</button>
+            <button role="tab" aria-selected="false" onclick="switchProjectTab('team')" data-ptab="team" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Team & permissions</button>
+            <button role="tab" aria-selected="false" onclick="switchProjectTab('handover')" data-ptab="handover" class="ptab text-white/60 px-4 py-2 rounded-full text-sm whitespace-nowrap">Handovers</button>
           </div>
-          <div id="projectTabContent" class="p-5"></div>
+          <div id="projectTabContent" role="tabpanel" tabindex="0" class="p-5 sm:p-6"></div>
         </div>
       </section>
 
@@ -293,6 +262,13 @@ body{background:#060A16;color:#E2E8F0}
             <label id="sourceUploadLabel" class="bg-white text-[#060A16] font-semibold px-4 py-2 rounded-full text-sm cursor-pointer flex items-center gap-2"><i data-lucide="upload" class="w-4 h-4"></i> Upload<input type="file" accept=".pdf,.docx,.txt,.md" class="hidden" multiple onchange="handleUpload(this.files)"></label>
           </div>
         </div>
+        <section id="githubRepositoriesPanel" class="glass rounded-2xl p-4 sm:p-5" aria-labelledby="githubRepositoriesHeading">
+          <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div><h2 id="githubRepositoriesHeading" class="text-sm font-semibold text-white">GitHub repositories</h2><p class="text-xs text-white/40 mt-1">Manually sync bounded README, commit and issue snapshots. Analysis remains an explicit action.</p></div>
+            <span class="text-[10px] font-mono tracking-wider text-white/35">READ ONLY · MANUAL SYNC</span>
+          </div>
+          <div id="githubRepositories" class="space-y-3" aria-live="polite"></div>
+        </section>
         <!-- dropzone -->
         <div id="dropzone" class="glass rounded-2xl border-dashed border-2 border-white/10 p-8 text-center hover:border-violet-500/40 transition">
           <div class="w-12 h-12 rounded-2xl bg-violet-600/20 flex items-center justify-center mx-auto"><i data-lucide="cloud-upload" class="w-6 h-6 text-violet-400"></i></div>
@@ -332,6 +308,10 @@ body{background:#060A16;color:#E2E8F0}
           <button onclick="setReviewFilter('needs_clarification')" data-rfilter="needs_clarification" class="rfilter bg-white/10 text-white/70 px-4 py-2 rounded-full text-sm whitespace-nowrap">Needs Clarification (0)</button>
         </div>
         <div id="reviewList" class="space-y-3"></div>
+        <section class="glass rounded-2xl p-4 sm:p-5 space-y-3" aria-labelledby="contradictionsHeading">
+          <div class="flex flex-wrap items-center justify-between gap-3"><div><h2 id="contradictionsHeading" class="text-sm font-semibold text-white">Cross-source contradiction candidates</h2><p class="mt-1 text-xs text-white/40">AI suggestions stay unconfirmed until an authorized human reviews exact revision evidence.</p></div><button id="detectContradictionsButton" type="button" onclick="detectContradictions()" class="rounded-full bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50">Check approved findings</button></div>
+          <div id="contradictionList" class="space-y-3" aria-live="polite"></div>
+        </section>
       </section>
 
       <!-- HANDOVER VIEW -->
@@ -351,8 +331,7 @@ body{background:#060A16;color:#E2E8F0}
             </div>
             <div class="glass rounded-2xl p-4">
               <p class="text-xs font-mono tracking-widest text-white/40">APPROVAL STATUS</p>
-              <p class="mt-3 text-xs text-white/40">Report approval workflow · Coming soon</p>
-              <button type="button" disabled class="mt-3 w-full bg-white/10 text-white/40 font-semibold py-2 rounded-full text-sm cursor-not-allowed">Request Final Approval · Soon</button>
+              <div id="handoverSignoffPanel" class="mt-3 space-y-3" aria-live="polite"></div>
             </div>
           </div>
           <div class="lg:col-span-2 glass rounded-2xl overflow-hidden">
@@ -368,9 +347,15 @@ body{background:#060A16;color:#E2E8F0}
 
       <!-- SETTINGS VIEW -->
       <section id="view-settings" class="hidden space-y-5 fade-in">
-        <h1 class="text-2xl font-semibold text-white">Settings</h1>
+        <div class="flex flex-wrap items-end justify-between gap-4"><div><p class="premium-eyebrow">Workspace administration</p><h1 class="premium-page-title text-2xl font-semibold text-white mt-1">Settings</h1><p class="text-sm text-white/40 mt-1">Account details, workflow access, and project lifecycle.</p></div></div>
+        <nav class="settings-nav" aria-label="Settings sections"><a href="#settings-deletion">Project lifecycle</a><a href="#settings-profile">Profile</a><a href="#settings-workflow">Workflow & security</a><a href="#settings-architecture">About RELAY</a></nav>
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div class="glass rounded-2xl p-5">
+          <div id="settings-deletion" class="glass rounded-2xl p-5 lg:col-span-3">
+            <h3 class="text-white font-semibold">Project deletion and recovery</h3>
+            <p class="mt-1 text-xs text-white/40">Owner-only controls. Deletion freezes access immediately and cleanup begins after the 30-day recovery window.</p>
+            <div id="projectDeletionPanel" class="mt-4" aria-live="polite"></div>
+          </div>
+          <div id="settings-profile" class="glass rounded-2xl p-5">
             <h3 class="text-white font-semibold">Profile</h3>
             <div class="mt-4 flex items-center gap-4"><span id="settingsAvatar" class="w-16 h-16 rounded-2xl bg-violet-600 grid place-items-center text-2xl font-semibold text-white">U</span><div><p id="settingsName" class="text-white font-medium">Account</p><p id="settingsEmail" class="text-white/40 text-sm"></p><span class="text-xs bg-violet-600 text-white px-2 py-0.5 rounded-full">Account</span></div></div>
             <div class="mt-5 space-y-3">
@@ -379,39 +364,40 @@ body{background:#060A16;color:#E2E8F0}
               <button type="button" disabled class="w-full bg-white/10 text-white/40 font-semibold py-2.5 rounded-full text-sm cursor-not-allowed">Profile editing · Coming soon</button>
             </div>
           </div>
-          <div class="glass rounded-2xl p-5">
+          <div id="settings-workflow" class="glass rounded-2xl p-5">
             <h3 class="text-white font-semibold">Workspace Permissions</h3>
             <div class="mt-4 space-y-3">
-              <div class="flex items-center justify-between bg-white/5 rounded-xl p-3"><div><p class="text-white text-sm">Review requirements</p><p class="text-white/40 text-xs">Configuration · Coming soon</p></div><span class="text-white/35 text-xs">Unavailable</span></div>
+              <div class="flex items-center justify-between bg-white/5 rounded-xl p-3"><div><p class="text-white text-sm">Review workflow</p><p class="text-white/40 text-xs">Assignments are managed in the project Team tab.</p></div><span class="text-emerald-300 text-xs">Available</span></div>
               <div class="flex items-center justify-between bg-white/5 rounded-xl p-3"><div><p class="text-white text-sm">Automatic analysis</p><p class="text-white/40 text-xs">Run analysis manually after upload</p></div><span class="text-white/35 text-xs">Manual</span></div>
               <div class="flex items-center justify-between bg-white/5 rounded-xl p-3"><div><p class="text-white text-sm">Source storage</p><p class="text-white/40 text-xs">Stored by the configured backend</p></div><span class="text-white/35 text-xs">See deployment setup</span></div>
             </div>
             <div class="mt-5">
               <h4 class="text-white font-medium text-sm">Environment</h4>
-              <div class="mt-2 bg-[#050914] border border-white/10 rounded-xl p-3 font-mono text-xs text-white/60 leading-relaxed">
-                PORT=5000<br>MONGODB_URI=mongodb+srv://...<br>JWT_SECRET=••••••••<br>GEMINI_API_KEY=••••••••<br>CLIENT_URL=http://localhost:5173
-              </div>
-              <a href="../server/.env.example" download class="text-xs text-violet-400 mt-2 inline-block">Download placeholder .env.example</a>
+              <p class="mt-2 text-xs leading-5 text-white/45">Server configuration is managed in the deployment environment. This page cannot read secrets or verify production values.</p>
+              <div class="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 font-mono text-[10px] leading-5 text-white/55">PORT · MONGODB_URI · JWT_SECRET · CLIENT_URL<br>GitHub App · AI providers · private storage<br>AUDIT_RETENTION_DAYS · SIGNOFF_RETENTION_DAYS · CRON_SECRET</div>
+            </div>
+            <div class="mt-5 border-t border-white/10 pt-4">
+              <h4 class="text-white font-medium text-sm">Audit and retention</h4>
+              <p class="mt-2 text-xs leading-5 text-white/45">Audit history is restricted to project owners and assigned audit readers. Retention is configured server-side; this browser does not reveal retention values. Project deletion has a 30-day recovery window before scheduled cleanup.</p>
             </div>
           </div>
-          <div class="glass rounded-2xl p-5">
+          <div id="settings-architecture" class="glass rounded-2xl p-5">
             <h3 class="text-white font-semibold">Project Structure</h3>
             <div class="mt-3 bg-[#050914] rounded-xl p-3 font-mono text-[11px] leading-5 text-white/60">
               RELAY/<br> ├─ client/ <span class="text-violet-400">HTML + JavaScript + Vite</span><br> │ ├─ index.html<br> │ └─ src/main.js<br> ├─ server/ <span class="text-sky-400">Express + MongoDB</span><br> │ └─ src/ (models, routes, middleware)<br> ├─ server/.env.example<br> └─ README.md
             </div>
-            <button type="button" disabled title="Project archive · Coming soon" class="mt-4 w-full bg-violet-600/40 text-white/50 font-semibold py-2.5 rounded-full text-sm flex items-center justify-center gap-2 cursor-not-allowed"><i data-lucide="download" class="w-4 h-4"></i> Project archive · Coming soon</button>
-            <p class="text-[11px] text-white/30 text-center mt-2">Settings and project export are not available yet.</p>
+            <p class="mt-3 text-xs leading-5 text-white/45">Project archive export is not available. See deployment guidance for runtime and storage configuration.</p>
           </div>
         </div>
       </section>
 
     </main>
-    <footer class="px-4 lg:px-6 py-4 border-t border-white/5 text-center text-xs text-white/30">RELAY · Evidence-linked handovers · Gemini analysis · Demo content clearly labeled as synthetic</footer>
+    <footer class="px-4 lg:px-6 py-4 border-t border-white/5 text-center text-xs text-white/30">RELAY · Evidence-linked project intelligence · AI-assisted, human-reviewed · Demo content clearly labeled as synthetic</footer>
   </div>
 </div>
 
 <!-- EVIDENCE MODAL -->
-<div id="reviewEditModal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4">
+<div id="reviewEditModal" role="dialog" aria-modal="true" class="fixed inset-0 z-[60] hidden items-center justify-center p-4">
   <button type="button" class="absolute inset-0 bg-[#060A16]/85 backdrop-blur-sm" aria-label="Close edit dialog" onclick="closeReviewDialogs()"></button>
   <form id="reviewEditForm" class="relative w-full max-w-xl glass rounded-2xl p-5 space-y-4" aria-labelledby="reviewEditTitle">
     <div><h2 id="reviewEditTitle" class="text-lg font-semibold text-white">Edit finding</h2><p id="reviewEditHint" class="text-xs text-white/45 mt-1">Update the finding before approval.</p></div>
@@ -422,7 +408,7 @@ body{background:#060A16;color:#E2E8F0}
     <div class="flex justify-end gap-2"><button type="button" onclick="closeReviewDialogs()" class="rounded-full bg-white/10 px-4 py-2 text-sm text-white">Cancel</button><button id="reviewEditSave" type="submit" class="rounded-full bg-violet-600 px-4 py-2 text-sm font-semibold text-white">Save changes</button></div>
   </form>
 </div>
-<div id="reviewCommentModal" class="fixed inset-0 z-[60] hidden items-center justify-center p-4">
+<div id="reviewCommentModal" role="dialog" aria-modal="true" class="fixed inset-0 z-[60] hidden items-center justify-center p-4">
   <button type="button" class="absolute inset-0 bg-[#060A16]/85 backdrop-blur-sm" aria-label="Close review dialog" onclick="closeReviewDialogs()"></button>
   <form id="reviewCommentForm" class="relative w-full max-w-lg glass rounded-2xl p-5 space-y-4" aria-labelledby="reviewCommentTitle">
     <div><h2 id="reviewCommentTitle" class="text-lg font-semibold text-white"></h2><p id="reviewCommentHint" class="text-xs text-white/45 mt-1"></p></div>
@@ -432,11 +418,11 @@ body{background:#060A16;color:#E2E8F0}
   </form>
 </div>
 
-<div id="evidenceModal" class="fixed inset-0 z-50 hidden">
+<div id="evidenceModal" role="dialog" aria-modal="true" aria-labelledby="evidenceModalTitle" class="fixed inset-0 z-50 hidden">
   <div class="absolute inset-0 bg-[#060A16]/80 backdrop-blur-sm" onclick="closeEvidence()"></div>
   <div class="absolute inset-4 lg:inset-10 bg-[#0A0F1E] border border-white/10 rounded-2xl flex flex-col overflow-hidden max-w-5xl mx-auto">
     <div class="p-4 border-b border-white/10 flex items-center justify-between bg-[#111B34]">
-      <div><p class="text-white font-semibold flex items-center gap-2"><i data-lucide="file-text" class="w-4 h-4 text-violet-400"></i> Evidence Viewer</p><p id="evFile" class="text-xs text-white/40">architecture-decision-ADR-014.md • Section 2.1 • Page 3</p></div>
+      <div><p id="evidenceModalTitle" class="text-white font-semibold flex items-center gap-2"><i data-lucide="file-text" class="w-4 h-4 text-violet-400"></i> Evidence Viewer</p><p id="evFile" class="text-xs text-white/40">Source evidence</p></div>
       <button onclick="closeEvidence()" class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center"><i data-lucide="x" class="w-4 h-4 text-white"></i></button>
     </div>
     <div class="flex-1 flex flex-col lg:flex-row overflow-hidden">
@@ -470,7 +456,7 @@ body{background:#060A16;color:#E2E8F0}
 </div>
 
 <!-- TOAST -->
-<div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 bg-white text-[#060A16] px-5 py-3 rounded-full text-sm font-medium shadow-xl hidden items-center gap-2 z-50"><i data-lucide="check-circle" class="w-4 h-4 text-emerald-500"></i><span id="toastMsg">Done</span></div>
+<div id="toast" role="status" aria-live="polite" class="toast fixed bottom-4 left-1/2 -translate-x-1/2 bg-white text-[#060A16] px-5 py-3 rounded-full text-sm font-medium shadow-xl hidden items-center gap-2 z-50"><i data-lucide="check-circle" class="w-4 h-4 text-emerald-500"></i><span id="toastMsg">Done</span></div>
 
 <script type="module" src="/src/main.js"></script>
 </body>

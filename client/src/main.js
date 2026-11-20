@@ -1,5 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
+import './styles.css';
+import { remainingSplashTime, resolveInitialRoute } from './startupFlow.js';
+import { createAuthRequest, isRegistrationPasswordValid } from './authFlow.js';
 import { DEMO_ANALYSIS_FALLBACK } from './data/demoAnalysisFallback.js';
+import { canRetryGitHubSync, canSyncGitHubRepository, createGitHubActionButton, createUiNode, githubConnectionLabel, githubInstallationStatusLabel, githubSyncErrorMessage, githubSyncStageLabel, githubSyncStatusLabel, isProjectOwner as isCurrentProjectOwner } from './githubUi.js';
+import { canReadProjectAudit as canReadProjectAuditForUser, canReviewContradiction as canReviewContradictionForUser, canSignHandover as canSignHandoverForUser, contradictionEvidenceView, contradictionStatusLabel, dashboardMetrics, deletionErrorMessage, isDeletionRecoverable, projectCardMetrics, projectDeletionCardPresentation, validateReviewerRationale, validateSignoffInput } from './round3WorkflowUi.js';
 
 const API_URL = (import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || window.RELAY_API_URL || '/api')).replace(/\/$/, '');
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || '').trim();
@@ -20,11 +25,15 @@ function getSupabaseBrowserClient() {
   return supabaseBrowser;
 }
 const TOKEN_KEY = 'relayToken';
-const state = { mode: 'real', token: localStorage.getItem(TOKEN_KEY), user: null, projects: [], selectedProjectId: '', sources: [], findings: [], handovers: [], selectedHandoverId: '', handoverError: '', handoverActionError: '', handoverLoading: false, handoverBusy: false, handoverDownloading: false, analysisJob: null, analysisJobError: '', analysisJobDiagnostic: null, analysisStarting: false, analysisAdvancing: false, errors: { projects: '', sources: '', findings: '' }, authMode: 'login', busy: false, reviewBusy: false, reviewFilter: 'all', sourceUploadBusy: false };
+const state = { mode: 'real', token: localStorage.getItem(TOKEN_KEY), user: null, projects: [], selectedProjectId: '', sources: [], findings: [], assignments: [], assignmentError: '', dashboardAuditEvents: [], dashboardAuditError: '', contradictions: [], contradictionError: '', contradictionLoading: false, contradictionBusyId: '', contradictionHistory: {}, handoverSignoffs: {}, handoverSignoffError: '', handoverSignoffBusyId: '', projectDeletion: null, projectDeletionError: '', projectDeletionLoading: false, projectDeletionBusy: false, githubRepositories: [], githubInstallations: [], githubAvailableRepositories: [], githubDiscoveryInstallationId: '', githubDiscoveryLoading: false, githubDiscoveryError: '', githubLinkingRepositoryId: '', githubAuthorizing: false, githubNotice: '', githubError: '', githubLoading: false, githubBusyLinkId: '', githubRetryingJobId: '', sourceRevisionCache: {}, analysisSelection: new Set(), handovers: [], selectedHandoverId: '', handoverError: '', handoverActionError: '', handoverLoading: false, handoverBusy: false, handoverDownloading: false, analysisJob: null, analysisJobError: '', analysisJobDiagnostic: null, analysisStarting: false, analysisAdvancing: false, errors: { projects: '', sources: '', findings: '' }, authMode: 'login', busy: false, reviewBusy: false, reviewFilter: 'all', sourceUploadBusy: false };
 let authGeneration = 0;
 let handoverRequest = 0;
 const analysisRunners = new Map();
 let analysisElapsedTimer = null;
+let githubPollTimer = null;
+let githubPollController = null;
+let githubPollGeneration = 0;
+let githubPollCount = 0;
 const categories = ['All', 'Decision', 'Completed Work', 'Pending Tasks', 'Responsibilities', 'Blockers', 'Dependencies', 'Risks', 'Next Actions', 'Unresolved Questions'];
 let activeCat = 'All';
 
@@ -55,13 +64,62 @@ const DEMO_WORKSPACE = Object.freeze({
 });
 
 const byId = (id) => document.getElementById(id);
-const node = (tag, text, className) => {
-  const el = document.createElement(tag);
-  if (text !== undefined && text !== null) el.textContent = String(text);
-  if (className) el.className = className;
-  return el;
-};
+const node = (tag, text, className) => createUiNode(document, tag, text, className);
 const clear = (el) => el?.replaceChildren();
+
+function accessibleFormDialog({ title, description = '', fields, submitLabel = 'Continue', danger = false }) {
+  return new Promise((resolve) => {
+    const dialog = node('dialog', undefined, 'w-[min(92vw,34rem)] rounded-2xl border border-white/15 bg-slate-900 p-0 text-white shadow-2xl backdrop:bg-black/70');
+    const form = node('form', undefined, 'space-y-4 p-6'); form.method = 'dialog';
+    const heading = node('h2', title, 'text-lg font-semibold'); heading.id = `dialog-title-${Date.now()}`;
+    form.setAttribute('aria-labelledby', heading.id);
+    form.append(heading);
+    if (description) {
+      const help = node('p', description, 'text-sm leading-6 text-white/65');
+      help.id = `dialog-description-${heading.id}`; dialog.setAttribute('aria-describedby', help.id); form.append(help);
+    }
+    const controls = [];
+    for (const field of fields) {
+      const wrapper = node('div', undefined, 'space-y-2');
+      const label = node('label', field.label, 'block text-sm text-white/80');
+      const input = node(field.type === 'text' ? 'input' : 'textarea', undefined, `${field.type === 'text' ? 'w-full' : 'min-h-28 w-full'} rounded-lg border border-white/15 bg-black/20 p-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-violet-400`);
+      if (field.type === 'text') input.type = 'text';
+      input.id = `dialog-field-${Date.now()}-${controls.length}`; label.htmlFor = input.id;
+      input.required = Boolean(field.required); input.maxLength = field.maxLength || 5000;
+      input.placeholder = field.placeholder || '';
+      if (field.help) input.setAttribute('aria-describedby', `${input.id}-help`);
+      wrapper.append(label, input);
+      if (field.help) { const help = node('p', field.help, 'text-xs text-white/45'); help.id = `${input.id}-help`; wrapper.append(help); }
+      form.append(wrapper); controls.push(input);
+    }
+    const actions = node('div', undefined, 'flex justify-end gap-3 pt-2');
+    const cancel = node('button', 'Cancel', 'rounded-full border border-white/15 px-4 py-2 text-sm text-white/75 hover:bg-white/5');
+    cancel.type = 'button';
+    const submit = node('button', submitLabel, `rounded-full px-4 py-2 text-sm font-semibold ${danger ? 'bg-rose-600 hover:bg-rose-500' : 'bg-violet-600 hover:bg-violet-500'}`);
+    submit.type = 'submit'; actions.append(cancel, submit); form.append(actions); dialog.append(form); document.body.append(dialog);
+    let settled = false;
+    const finish = (value) => { if (settled) return; settled = true; dialog.close(); dialog.remove(); resolve(value); };
+    cancel.addEventListener('click', () => finish(null));
+    dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(null); });
+    form.addEventListener('submit', (event) => { event.preventDefault(); finish(controls.map((control) => control.value)); });
+    dialog.addEventListener('close', () => finish(null), { once: true });
+    dialog.showModal(); controls[0]?.focus();
+  });
+}
+
+async function confirmInApp(message, title = 'Confirm action', danger = false) {
+  const result = await accessibleFormDialog({ title, description: message, fields: [], submitLabel: 'Confirm', danger });
+  return result !== null;
+}
+
+function stopGitHubPolling() {
+  githubPollGeneration += 1;
+  if (githubPollTimer) window.clearTimeout(githubPollTimer);
+  githubPollTimer = null;
+  githubPollController?.abort();
+  githubPollController = null;
+  githubPollCount = 0;
+}
 
 async function api(path, options = {}) {
   if (state.mode === 'demo') throw new Error('Demo mode does not send requests to the RELAY API.');
@@ -92,6 +150,7 @@ async function api(path, options = {}) {
     if (response.status === 401 && state.token) expireSession();
     const error = new Error(data.message || `Request failed (${response.status})`);
     error.status = response.status;
+    error.code = data.code;
     error.diagnostic = requestDiagnostic;
     throw error;
   }
@@ -156,6 +215,7 @@ function showApp() {
 }
 
 function expireSession() {
+  stopGitHubPolling();
   state.mode = 'real';
   state.token = null;
   state.user = null;
@@ -163,6 +223,21 @@ function expireSession() {
   state.selectedProjectId = '';
   state.sources = [];
   state.findings = [];
+  state.assignments = [];
+  state.assignmentError = '';
+  state.contradictions = []; state.contradictionError = ''; state.contradictionHistory = {};
+  state.handoverSignoffs = {}; state.handoverSignoffError = '';
+  state.projectDeletion = null; state.projectDeletionError = '';
+  state.githubRepositories = [];
+  state.githubInstallations = [];
+  state.githubAvailableRepositories = [];
+  state.githubDiscoveryInstallationId = '';
+  state.githubDiscoveryLoading = false;
+  state.githubDiscoveryError = '';
+  state.githubNotice = '';
+  state.githubError = '';
+  state.sourceRevisionCache = {};
+  state.analysisSelection = new Set();
   state.handovers = [];
   state.analysisJob = null;
   state.analysisJobError = '';
@@ -173,6 +248,7 @@ function expireSession() {
 }
 
 function enterDemo() {
+  stopGitHubPolling();
   authGeneration += 1;
   state.mode = 'demo';
   state.token = null;
@@ -181,6 +257,19 @@ function enterDemo() {
   state.selectedProjectId = DEMO_WORKSPACE.project._id;
   state.sources = structuredClone(DEMO_WORKSPACE.sources);
   state.findings = structuredClone(DEMO_WORKSPACE.findings);
+  state.assignments = [];
+  state.assignmentError = '';
+  state.contradictions = []; state.contradictionError = ''; state.contradictionHistory = {};
+  state.handoverSignoffs = {}; state.handoverSignoffError = '';
+  state.projectDeletion = null; state.projectDeletionError = '';
+  state.githubRepositories = [];
+  state.githubInstallations = [];
+  state.githubAvailableRepositories = [];
+  state.githubDiscoveryInstallationId = '';
+  state.githubNotice = '';
+  state.githubError = '';
+  state.sourceRevisionCache = {};
+  state.analysisSelection = new Set();
   state.handovers = [];
   state.analysisJob = null;
   state.analysisJobError = '';
@@ -192,6 +281,7 @@ function enterDemo() {
 }
 
 function exitDemo() {
+  stopGitHubPolling();
   authGeneration += 1;
   state.mode = 'real';
   state.token = localStorage.getItem(TOKEN_KEY);
@@ -199,14 +289,26 @@ function exitDemo() {
   state.selectedProjectId = '';
   state.sources = [];
   state.findings = [];
+  state.assignments = [];
+  state.assignmentError = '';
+  state.contradictions = []; state.contradictionError = ''; state.contradictionHistory = {};
+  state.handoverSignoffs = {}; state.handoverSignoffError = '';
+  state.projectDeletion = null; state.projectDeletionError = '';
+  state.githubRepositories = [];
+  state.githubInstallations = [];
+  state.githubAvailableRepositories = [];
+  state.githubDiscoveryInstallationId = '';
+  state.githubNotice = '';
+  state.githubError = '';
+  state.sourceRevisionCache = {};
+  state.analysisSelection = new Set();
   state.handovers = [];
   state.analysisJob = null;
   state.analysisJobError = '';
   state.errors = { projects: '', sources: '', findings: '' };
   byId('app').classList.add('hidden');
   byId('authOverlay').classList.remove('hidden');
-  byId('authEmail').focus();
-  restoreSession();
+  byId('authEmail')?.focus();
 }
 
 function toggleAuthMode() {
@@ -223,7 +325,9 @@ function toggleAuthMode() {
     passwordInput.removeAttribute('minlength');
     passwordInput.removeAttribute('maxlength');
   }
-  byId('loginBtn').firstChild.textContent = registering ? 'Create account ' : 'Sign in ';
+  byId('authHeading').textContent = registering ? 'Create your account' : 'Welcome back';
+  byId('authIntro').textContent = registering ? 'Set up your RELAY workspace account.' : 'Sign in to continue where your team left off.';
+  byId('loginBtnLabel').textContent = registering ? 'Create account' : 'Sign in';
   byId('authSwitchText').textContent = registering ? 'Already have an account?' : 'No account?';
   byId('authSwitch').textContent = registering ? 'Sign in' : 'Create account';
   byId('authError').classList.add('hidden');
@@ -235,9 +339,12 @@ async function login(event) {
   const errorEl = byId('authError');
   errorEl.classList.add('hidden');
   const registering = state.authMode === 'register';
-  const payload = { email: byId('authEmail').value.trim().toLowerCase(), password: byId('authPass').value };
-  if (registering) payload.name = byId('authName').value.trim();
-  if (registering && payload.password.length < 8) {
+  const { endpoint, payload } = createAuthRequest(state.authMode, {
+    email: byId('authEmail').value,
+    password: byId('authPass').value,
+    name: byId('authName').value,
+  });
+  if (registering && !isRegistrationPasswordValid(payload.password)) {
     errorEl.textContent = 'Use a password with at least 8 characters.';
     errorEl.classList.remove('hidden');
     return;
@@ -246,9 +353,13 @@ async function login(event) {
   const attempt = ++authGeneration;
   const button = byId('loginBtn');
   button.disabled = true;
-  button.textContent = registering ? 'Creating account…' : 'Signing in…';
+  button.setAttribute('aria-busy', 'true');
+  byId('loginBtnLabel').textContent = registering ? 'Creating account…' : 'Signing in…';
+  const buttonIcon = button.querySelector('[data-lucide]');
+  if (buttonIcon) buttonIcon.setAttribute('data-lucide', 'loader-circle');
+  window.lucide?.createIcons();
   try {
-    const data = await api(`/auth/${registering ? 'register' : 'login'}`, { method: 'POST', body: JSON.stringify(payload) });
+    const data = await api(endpoint, { method: 'POST', body: JSON.stringify(payload) });
     if (attempt !== authGeneration || state.mode !== 'real') return;
     state.token = data.token;
     state.user = data.user;
@@ -267,7 +378,11 @@ async function login(event) {
   } finally {
     state.busy = false;
     button.disabled = false;
-    button.textContent = registering ? 'Create account' : 'Sign in';
+    button.removeAttribute('aria-busy');
+    byId('loginBtnLabel').textContent = registering ? 'Create account' : 'Sign in';
+    const icon = button.querySelector('[data-lucide]');
+    if (icon) icon.setAttribute('data-lucide', 'arrow-right');
+    window.lucide?.createIcons();
   }
 }
 
@@ -275,8 +390,73 @@ function logout() { expireSession(); }
 function togglePass() {
   const input = byId('authPass');
   input.type = input.type === 'password' ? 'text' : 'password';
+  const visible = input.type === 'text';
+  const button = byId('togglePassButton');
+  button?.setAttribute('aria-label', visible ? 'Hide password' : 'Show password');
+  button?.setAttribute('aria-pressed', String(visible));
+  const icon = button?.querySelector('[data-lucide]');
+  if (icon) icon.setAttribute('data-lucide', visible ? 'eye-off' : 'eye');
+  window.lucide?.createIcons();
 }
-function toggleSidebar() { byId('sidebar').classList.toggle('-translate-x-full'); }
+function toggleSidebar() {
+  const sidebar = byId('sidebar');
+  const open = sidebar.classList.contains('-translate-x-full');
+  sidebar.classList.toggle('-translate-x-full', !open);
+  byId('sidebarBackdrop')?.classList.toggle('hidden', !open);
+  byId('mobileNavToggle')?.setAttribute('aria-expanded', String(open));
+}
+function toggleDesktopSidebar() {
+  const collapsed = byId('app')?.classList.toggle('sidebar-collapsed');
+  const button = byId('desktopSidebarToggle');
+  button?.setAttribute('aria-expanded', String(!collapsed));
+  button?.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  const icon = button?.querySelector('[data-lucide]');
+  if (icon) icon.setAttribute('data-lucide', collapsed ? 'panel-left-open' : 'panel-left-close');
+  window.lucide?.createIcons();
+}
+
+function bindAuthMotion() {
+  const scene = byId('authWorkflowScene');
+  if (!scene || !window.matchMedia || window.matchMedia('(prefers-reduced-motion: reduce)').matches || window.matchMedia('(pointer: coarse)').matches) return;
+  let frame = 0;
+  scene.addEventListener('pointermove', (event) => {
+    if (frame) return;
+    frame = window.requestAnimationFrame(() => {
+      const bounds = scene.getBoundingClientRect();
+      const x = (event.clientX - bounds.left) / bounds.width - 0.5;
+      const y = (event.clientY - bounds.top) / bounds.height - 0.5;
+      scene.style.setProperty('--scene-tilt-x', `${(-y * 4).toFixed(2)}deg`);
+      scene.style.setProperty('--scene-tilt-y', `${(x * 5).toFixed(2)}deg`);
+      scene.style.setProperty('--scene-shift-x', `${(x * 8).toFixed(1)}px`);
+      scene.style.setProperty('--scene-shift-y', `${(y * 6).toFixed(1)}px`);
+      frame = 0;
+    });
+  });
+  scene.addEventListener('pointerleave', () => {
+    scene.style.setProperty('--scene-tilt-x', '0deg');
+    scene.style.setProperty('--scene-tilt-y', '0deg');
+    scene.style.setProperty('--scene-shift-x', '0px');
+    scene.style.setProperty('--scene-shift-y', '0px');
+  });
+}
+
+function consumeGitHubCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const outcome = params.get('github');
+  const projectId = params.get('projectId');
+  if (!['authorized', 'no_installations', 'cancelled', 'failed'].includes(outcome) || !/^[a-f\d]{24}$/i.test(projectId || '')) return null;
+  window.history.replaceState({}, '', `${window.location.pathname}${window.location.hash}`);
+  return { outcome, projectId };
+}
+
+function githubCallbackMessage(outcome) {
+  return ({
+    authorized: 'GitHub authorization succeeded. Choose an installation and explicitly link a repository below.',
+    no_installations: 'GitHub authorization succeeded, but no active RELAY App installation was found. Install the RELAY GitHub App first.',
+    cancelled: 'GitHub authorization was cancelled. No installation was linked.',
+    failed: 'GitHub authorization could not be completed. No repository was linked.',
+  })[outcome] || '';
+}
 
 async function loadProjects() {
   if (state.mode === 'demo') {
@@ -291,6 +471,11 @@ async function loadProjects() {
     const data = await api('/projects');
     state.errors.projects = '';
     state.projects = data.projects || [];
+    const callback = consumeGitHubCallback();
+    if (callback) {
+      state.githubNotice = githubCallbackMessage(callback.outcome);
+      state.githubCallbackProjectId = callback.projectId;
+    }
     refreshProjectControls();
     renderProjects();
     renderProjectSelector();
@@ -299,14 +484,24 @@ async function loadProjects() {
       state.selectedProjectId = '';
       state.sources = [];
       state.findings = [];
+      state.githubInstallations = [];
+      state.githubAvailableRepositories = [];
+      state.githubDiscoveryInstallationId = '';
       state.errors.sources = '';
       state.errors.findings = '';
       renderSources(); renderFindings(); renderReview();
       return;
     }
+    if (state.githubCallbackProjectId && state.projects.some((project) => String(project._id) === state.githubCallbackProjectId)) state.selectedProjectId = state.githubCallbackProjectId;
     if (!state.projects.some((project) => project._id === state.selectedProjectId)) state.selectedProjectId = state.projects[0]._id;
     select.value = state.selectedProjectId;
     await loadProjectData();
+    if (callback) {
+      navigate('sources');
+      toast(state.githubNotice, callback.outcome === 'authorized' ? 'success' : 'error');
+      state.githubCallbackProjectId = '';
+      renderGitHubRepositories();
+    }
   } catch (error) {
     state.errors.projects = error.message;
     state.errors.sources = error.message;
@@ -339,14 +534,35 @@ function renderProjectSelector(errorMessage = '') {
 }
 
 async function selectProject(projectId) {
+  stopGitHubPolling();
   handoverRequest += 1;
   state.selectedProjectId = projectId;
   state.handovers = [];
   state.selectedHandoverId = '';
   state.handoverError = '';
   state.handoverActionError = '';
+  state.handoverSignoffs = {};
+  state.handoverSignoffError = '';
+  state.contradictions = [];
+  state.contradictionError = '';
+  state.contradictionHistory = {};
+  state.projectDeletion = null;
+  state.projectDeletionError = '';
   state.analysisJob = null;
   state.analysisJobError = '';
+  state.githubRepositories = [];
+  state.githubInstallations = [];
+  state.githubAvailableRepositories = [];
+  state.githubDiscoveryInstallationId = '';
+  state.githubDiscoveryLoading = false;
+  state.githubDiscoveryError = '';
+  state.githubNotice = '';
+  state.githubError = '';
+  state.githubLoading = false;
+  state.githubBusyLinkId = '';
+  state.githubRetryingJobId = '';
+  state.sourceRevisionCache = {};
+  state.analysisSelection = new Set();
   renderAnalysisJob();
   const project = state.projects.find((item) => item._id === projectId);
   if (project) {
@@ -362,21 +578,41 @@ async function selectProject(projectId) {
 
 async function loadProjectData() {
   if (!state.selectedProjectId) {
+    stopGitHubPolling();
     state.sources = [];
     state.findings = [];
+    state.assignments = [];
+    state.assignmentError = '';
+    state.contradictions = [];
+    state.contradictionError = '';
     state.errors.sources = '';
     state.errors.findings = '';
     state.analysisJob = null;
     state.analysisJobError = '';
+    state.githubRepositories = [];
+    state.githubInstallations = [];
+    state.githubAvailableRepositories = [];
+    state.githubDiscoveryInstallationId = '';
+    state.githubError = '';
     renderAnalysisJob();
     renderSources(); renderFindings(); renderReview();
     return;
   }
   if (state.mode === 'demo') {
+    stopGitHubPolling();
     state.errors.sources = '';
     state.errors.findings = '';
+    state.assignments = [];
+    state.assignmentError = '';
+    state.contradictions = [];
+    state.contradictionError = '';
     state.analysisJob = null;
     state.analysisJobError = '';
+    state.githubRepositories = [];
+    state.githubInstallations = [];
+    state.githubAvailableRepositories = [];
+    state.githubDiscoveryInstallationId = '';
+    state.githubError = '';
     renderAnalysisJob();
     renderSources(); renderFindings(); renderReview(); renderProjects(); renderDashboard();
     return;
@@ -384,19 +620,45 @@ async function loadProjectData() {
   setStatus(byId('sourcesList'), 'Loading sources…', 'loading');
   setStatus(byId('findingsGrid'), 'Loading findings…', 'loading');
   setStatus(byId('reviewList'), 'Loading review queue…', 'loading');
+  state.githubLoading = true;
+  renderGitHubRepositories();
   const id = encodeURIComponent(state.selectedProjectId);
   const results = await Promise.allSettled([
     api(`/projects/${id}/sources`),
     api(`/projects/${id}/findings`),
+    api(`/projects/${id}/assignments`),
+    api(`/projects/${id}/github/repositories`),
+    isCurrentProjectOwner(currentProject(), state.user?.id) ? api(`/projects/${id}/github/installations`) : Promise.resolve({ installations: [] }),
+    api(`/projects/${id}/contradictions`),
+    api(`/projects/${id}/handovers`),
   ]);
   if (results[0].status === 'fulfilled') { state.sources = results[0].value.sources || []; state.errors.sources = ''; }
   else { state.sources = []; state.errors.sources = results[0].reason.message; }
   if (results[1].status === 'fulfilled') { state.findings = results[1].value.findings || []; state.errors.findings = ''; }
   else { state.findings = []; state.errors.findings = results[1].reason.message; }
+  if (results[2].status === 'fulfilled') { state.assignments = results[2].value.assignments || []; state.assignmentError = ''; }
+  else { state.assignments = []; state.assignmentError = results[2].reason.message; }
+  if (results[3].status === 'fulfilled') { state.githubRepositories = results[3].value.repositories || []; state.githubError = ''; }
+  else { state.githubRepositories = []; state.githubError = results[3].reason.message; }
+  state.githubInstallations = results[4].status === 'fulfilled' ? results[4].value.installations || [] : [];
+  if (results[5].status === 'fulfilled') { state.contradictions = results[5].value.candidates || []; state.contradictionError = ''; }
+  else { state.contradictions = []; state.contradictionError = results[5].reason.message; }
+  if (results[6].status === 'fulfilled') state.handovers = results[6].value.handovers || [];
+  else state.handovers = [];
+  state.handoverError = results[6].status === 'rejected' ? results[6].reason.message : '';
+  state.dashboardAuditEvents = []; state.dashboardAuditError = '';
+  if (canReadProjectAudit()) {
+    try { state.dashboardAuditEvents = (await api(`/projects/${id}/audit-events?limit=5`)).events || []; }
+    catch (error) { state.dashboardAuditError = error.message; }
+  }
+  state.githubLoading = false;
+  const currentSourceIds = new Set(state.sources.filter((source) => source.status === 'processed').map((source) => String(source._id)));
+  state.analysisSelection = new Set([...state.analysisSelection].filter((sourceId) => currentSourceIds.has(sourceId)));
   refreshProjectControls();
-  renderSources(); renderFindings(); renderReview(); renderProjects();
+  renderSources(); renderFindings(); renderReview(); renderProjects(); renderGitHubRepositories();
   renderDashboard();
   await loadAnalysisJob({ resume: true });
+  resumeGitHubPolling();
 }
 
 function renderProjects() {
@@ -409,23 +671,51 @@ function renderProjects() {
   const visible = state.projects.filter((project) => (!query || `${project.name} ${project.description || ''}`.toLowerCase().includes(query)) && (statusFilter === 'all' || project.status === statusFilter.toLowerCase()));
   if (!visible.length) { setStatus(container, 'No projects match your search.'); return; }
   visible.forEach((project) => {
-    const card = node('button', undefined, 'glass rounded-2xl p-5 card-hover cursor-pointer text-left w-full');
+    const card = node('button', undefined, 'project-card glass rounded-2xl p-5 card-hover cursor-pointer text-left w-full');
     card.type = 'button';
-    card.addEventListener('click', () => { selectProject(project._id); navigate('sources'); });
+    const deletion = projectDeletionCardPresentation(project);
+    const deletionState = deletion.state;
+    const isRecoverable = deletion.recoverable;
+    card.setAttribute('aria-label', `${project.name}, ${deletionState === 'active' ? project.status || 'active' : `project ${deletionState}`}${isRecoverable ? ', recovery available in project settings' : ''}`);
+    card.addEventListener('click', () => { selectProject(project._id); navigate(deletion.destination); });
     const top = node('div', undefined, 'flex items-center justify-between');
-    const badge = node('span', String(project.status || 'active').toUpperCase(), 'text-[11px] font-mono tracking-widest px-2.5 py-1 rounded-full bg-emerald-500 text-white');
+    const badgeText = deletion.label;
+    const badge = node('span', badgeText, `text-[11px] font-mono tracking-widest px-2.5 py-1 rounded-full ${deletionState === 'active' ? 'bg-emerald-500 text-white' : 'bg-amber-500/20 text-amber-100'}`);
     const updated = node('span', project.updatedAt ? new Date(project.updatedAt).toLocaleDateString() : '', 'text-xs text-white/40');
     const role = state.mode === 'demo' ? 'DEMO' : String(project.owner) === String(state.user?.id) ? 'OWNER' : ((project.members || []).find((member) => String(member.user?._id || member.user) === String(state.user?.id))?.role || 'MEMBER').toUpperCase();
     top.append(badge, node('span', role, 'text-[10px] font-mono tracking-wider text-violet-200 bg-violet-500/15 px-2 py-1 rounded-full'), updated);
     const title = node('h3', project.name, 'text-white font-semibold mt-3');
     const description = node('p', project.description || 'No description provided.', 'text-white/40 text-sm mt-1 line-clamp-2');
-    card.append(top, title, description, node('p', 'Open project →', 'mt-4 text-xs text-violet-400'));
+    card.append(top, title, description);
+    const cardMetrics = projectCardMetrics(project, { selected: String(project._id) === String(state.selectedProjectId), sources: state.sources, findings: state.findings, sourcesUnavailable: Boolean(state.errors.sources), findingsUnavailable: Boolean(state.errors.findings) });
+    const meta = node('div', undefined, 'mt-3 flex flex-wrap gap-2');
+    const people = node('div', undefined, 'flex items-center -space-x-2');
+    const memberUsers = (project.members || []).map((member) => member.user).filter((user) => user && typeof user === 'object');
+    const isOwner = String(project.owner) === String(state.user?.id);
+    const isMember = (project.members || []).some((member) => String(member.user?._id || member.user) === String(state.user?.id));
+    if ((isOwner || isMember) && state.user) memberUsers.unshift(state.user);
+    memberUsers.slice(0, 4).forEach((person) => {
+      const initials = (person.name || person.email || 'Member').split(/[\s@]+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join('');
+      const avatar = node('span', initials, 'grid h-8 w-8 place-items-center rounded-full border-2 border-white bg-indigo-50 text-[10px] font-semibold text-indigo-700');
+      avatar.title = person.name || person.email || 'Project member';
+      people.append(avatar);
+    });
+    if (people.childElementCount) meta.append(people);
+    meta.append(node('span', `${cardMetrics.teamMembers} team member${cardMetrics.teamMembers === 1 ? '' : 's'}`, 'self-center text-xs text-white/45'));
+    if (String(project._id) === String(state.selectedProjectId)) {
+      meta.append(node('span', cardMetrics.sources === null ? 'Sources unavailable' : `${cardMetrics.sources} source(s)`, 'rounded-lg bg-white/5 px-2.5 py-1.5 text-xs text-white/60'));
+      meta.append(node('span', cardMetrics.findings === null ? 'Findings unavailable' : `${cardMetrics.findings} finding(s)`, 'rounded-lg bg-white/5 px-2.5 py-1.5 text-xs text-white/60'));
+      meta.append(node('span', cardMetrics.pending === null ? 'Review count unavailable' : `${cardMetrics.pending} pending review`, 'rounded-lg bg-amber-500/15 px-2.5 py-1.5 text-xs text-amber-200'));
+    } else meta.append(node('span', 'Open for project metrics', 'rounded-lg bg-white/5 px-2.5 py-1.5 text-xs text-white/45'));
+    card.append(meta);
+    if (deletion.recoveryEndsAt) card.append(node('p', `Recovery deadline ${deletion.recoveryEndsAt.toLocaleString()}`, 'mt-3 text-xs text-amber-100/70'));
+    card.append(node('p', isRecoverable ? 'Open project settings to recover →' : deletionState === 'active' ? 'Open project →' : 'View project cleanup status →', 'mt-4 text-xs text-violet-300'));
     container.append(card);
   });
 }
 
 async function openCreateProject() {
-  const name = window.prompt('Project name:');
+  const [name] = await accessibleFormDialog({ title: 'Create a project', description: 'Start a workspace for source material, review, and handover.', fields: [{ type: 'text', label: 'Project name', required: true, maxLength: 100, placeholder: 'e.g. Platform migration' }], submitLabel: 'Create project' }) || [];
   if (!name?.trim()) return;
   if (state.mode === 'demo') {
     const project = { _id: `demo-project-${Date.now()}`, name: name.trim(), description: 'Created in the local demo session; this project is not saved.', status: 'active', createdAt: new Date().toISOString() };
@@ -457,6 +747,7 @@ function renderSources() {
   const container = byId('sourcesList');
   if (!container) return;
   refreshProjectControls();
+  renderGitHubRepositories();
   clear(container);
   if (state.errors.sources) { setStatus(container, `Could not load sources: ${state.errors.sources}`, 'error'); return; }
   if (!state.selectedProjectId) { setStatus(container, 'Select or create a project before uploading sources.'); return; }
@@ -465,16 +756,425 @@ function renderSources() {
   const sources = state.sources.filter((source) => filter === 'all' || statusLabel(source.status) === filter);
   if (!sources.length) { setStatus(container, state.sources.length ? 'No sources match this status.' : 'No sources in this project yet. Upload a document to get started.'); return; }
   sources.forEach((source) => {
-    const card = node('div', undefined, 'glass rounded-2xl p-4 flex gap-4');
-    const ext = source.originalName?.split('.').pop()?.toUpperCase() || 'FILE';
+    const card = node('div', undefined, `source-card glass rounded-2xl p-4 flex gap-4 ${source.provider === 'github' ? 'source-card-github' : ''}`);
+    const imported = source.provider === 'github';
+    const ext = imported ? String(source.externalType || 'github').toUpperCase() : source.originalName?.split('.').pop()?.toUpperCase() || 'FILE';
     card.append(node('div', ext, 'w-11 h-11 rounded-xl bg-violet-500/20 text-violet-400 flex items-center justify-center shrink-0 font-mono text-xs font-bold'));
     const content = node('div', undefined, 'flex-1 min-w-0');
     content.append(node('p', source.originalName, 'text-white text-sm font-medium truncate'));
-    content.append(node('p', `${statusLabel(source.status)}${source.size ? ` · ${(source.size / 1024).toFixed(1)} KB` : ''}`, 'text-white/40 text-xs mt-1'));
+    content.append(node('p', `${imported ? 'GitHub import · ' : ''}${statusLabel(source.status)}${source.size ? ` · ${(source.size / 1024).toFixed(1)} KB` : ''}`, 'text-white/40 text-xs mt-1'));
+    if (imported) {
+      const repository = state.githubRepositories.find((item) => String(item.id) === String(source.repositoryLink));
+      content.append(node('p', `From ${repository?.fullName || 'linked GitHub repository'}${source.externalType === 'issue' ? ` · Issue #${source.externalId}` : source.externalType === 'commit' ? ` · Commit ${String(source.externalId || '').slice(0, 12)}` : source.externalType === 'readme' ? ` · ${source.externalId || 'README'}` : ''}`, 'text-xs text-sky-200/80 mt-1 break-words'));
+      if (source.currentRevision) content.append(node('p', `Current revision · ${String(source.currentRevision).slice(-8)}`, 'text-[10px] font-mono text-white/35 mt-1'));
+      const revisionState = state.sourceRevisionCache[source._id];
+      const latestRevision = revisionState?.revisions?.find((revision) => revision.isCurrent);
+      if (latestRevision?.locator?.truncated) content.append(node('p', 'Content was truncated to the approved ingestion limit.', 'text-xs text-amber-200 mt-1'));
+    }
     if (source.error) content.append(node('p', source.error, 'text-red-300 text-xs mt-2'));
+    if (source.status === 'processed' && canManageCurrentProject()) {
+      const selectLabel = node('label', undefined, 'mt-3 flex items-center gap-2 text-xs text-white/55 cursor-pointer');
+      const checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = state.analysisSelection.has(String(source._id));
+      checkbox.setAttribute('aria-label', `Select ${source.originalName} for explicit AI analysis`);
+      checkbox.addEventListener('change', () => {
+        const selected = new Set(state.analysisSelection);
+        if (checkbox.checked) selected.add(String(source._id)); else selected.delete(String(source._id));
+        state.analysisSelection = selected;
+        renderAnalysisSelectionCount();
+      });
+      selectLabel.append(checkbox, node('span', 'Include in next explicit analysis'));
+      content.append(selectLabel);
+    }
+    const actions = node('div', undefined, 'mt-3 flex flex-wrap gap-2');
+    if (imported) {
+      const view = node('button', 'View captured text', 'rounded-full bg-white/10 px-3 py-1.5 text-[11px] text-white/75 hover:bg-white/15');
+      view.type = 'button';
+      view.addEventListener('click', () => toggleGitHubSourceText(source, actions));
+      const history = node('button', 'Revision history', 'rounded-full bg-white/10 px-3 py-1.5 text-[11px] text-white/75 hover:bg-white/15');
+      history.type = 'button';
+      history.addEventListener('click', () => toggleGitHubRevisionHistory(source, actions));
+      actions.append(view, history);
+    }
+    if (actions.childElementCount) content.append(actions);
     card.append(content);
     container.append(card);
   });
+}
+
+function renderAnalysisSelectionCount() {
+  const count = state.analysisSelection.size;
+  for (const id of ['analyzeTopButton', 'analyzeFindingsButton']) {
+    const label = byId(id)?.querySelector('span');
+    if (label && (!state.analysisJob || state.analysisJob.status === 'completed')) label.textContent = count ? `Analyze ${count} Selected` : 'Analyze New Sources';
+  }
+}
+
+function renderGitHubRepositories() {
+  const container = byId('githubRepositories');
+  const panel = byId('githubRepositoriesPanel');
+  if (!container || !panel) return;
+  panel.classList.toggle('hidden', state.mode === 'demo');
+  clear(container);
+  if (state.mode === 'demo') return;
+  if (!state.selectedProjectId) { setStatus(container, 'Select a project to view linked repositories.'); return; }
+  if (state.githubLoading) { setStatus(container, 'Loading linked GitHub repositories…', 'loading'); return; }
+  if (state.githubError) {
+    const retry = node('button', `Could not load GitHub connections: ${state.githubError} · Retry`, 'w-full rounded-xl border border-rose-300/20 bg-rose-500/10 px-3 py-3 text-left text-xs text-rose-200');
+    retry.type = 'button'; retry.addEventListener('click', loadGitHubRepositories);
+    container.append(retry); return;
+  }
+  if (state.githubNotice) {
+    const tone = state.githubNotice.startsWith('GitHub authorization succeeded') ? 'border-emerald-300/15 bg-emerald-500/10 text-emerald-100' : 'border-amber-300/15 bg-amber-500/10 text-amber-100';
+    container.append(node('p', state.githubNotice, `rounded-xl border px-3 py-2 text-xs ${tone}`));
+  }
+  if (isCurrentProjectOwner(currentProject(), state.user?.id)) renderGitHubLinkingControls(container);
+  if (!state.githubRepositories.length) {
+    const empty = node('div', undefined, 'rounded-xl border border-white/5 bg-white/[0.02] p-3');
+    empty.append(node('p', 'No GitHub repositories are linked to this project.', 'text-xs text-white/55'));
+    container.append(empty);
+  }
+  state.githubRepositories.forEach((repository) => {
+    const row = node('article', undefined, 'repository-card rounded-xl border border-white/5 bg-white/[0.025] p-3 sm:p-4');
+    const top = node('div', undefined, 'flex flex-wrap items-start justify-between gap-3');
+    const identity = node('div', undefined, 'min-w-0 flex-1');
+    const name = node('p', repository.fullName || `${repository.ownerLogin}/${repository.name}`, 'break-all text-sm font-semibold text-white');
+    const status = githubConnectionLabel(repository);
+    const statusStyle = status === 'Connected' ? 'text-emerald-200 bg-emerald-500/10' : status === 'Unlinked' ? 'text-white/45 bg-white/5' : 'text-amber-200 bg-amber-500/10';
+    const badge = node('span', status, `rounded-full px-2.5 py-1 text-[10px] font-mono ${statusStyle}`);
+    identity.append(name, node('p', `${repository.installation?.accountLogin ? `GitHub account · ${repository.installation.accountLogin}` : 'GitHub App installation'}${repository.installation?.lastVerifiedAt ? ` · verified ${new Date(repository.installation.lastVerifiedAt).toLocaleString()}` : ''}`, 'mt-1 text-[11px] text-white/40 break-words'));
+    top.append(identity, badge); row.append(top);
+    if (repository.status === 'unlinked') row.append(node('p', `Unlinked ${repository.unlinkedAt ? new Date(repository.unlinkedAt).toLocaleString() : ''} · imported sources and revision provenance are retained.`, 'mt-2 text-xs text-white/40'));
+    else if (repository.connectionStatus === 'needs_reauthorization') row.append(node('p', 'GitHub access is suspended or removed. The project owner must authorize the installation again.', 'mt-2 text-xs text-amber-200/80'));
+    else if (repository.connectionStatus === 'needs_verification') row.append(node('p', 'The saved installation status is stale. Sync will verify repository access before importing.', 'mt-2 text-xs text-amber-100/70'));
+
+    const job = repository.latestSyncJob;
+    if (job) {
+      const statusText = githubSyncStatusLabel(job);
+      const progress = node('div', undefined, 'mt-3 rounded-lg border border-white/5 bg-black/15 p-3');
+      const line = node('div', undefined, 'flex flex-wrap items-center justify-between gap-2');
+      line.append(node('p', `${statusText} · ${githubSyncStageLabel(job.stage)}`, 'text-xs font-medium text-white/80'));
+      if (job.startedAt) line.append(node('p', new Date(job.startedAt).toLocaleString(), 'text-[10px] text-white/35'));
+      progress.append(line);
+      const counts = job.counts || {};
+      progress.append(node('p', `${job.checkpoints?.readme?.status === 'completed' ? 'README captured' : job.checkpoints?.readme?.status === 'skipped' ? 'README missing' : 'README pending'} · ${counts.commitsCaptured || 0} commits · ${counts.issuesCaptured || 0} issues · ${counts.sourcesCreated || 0} sources created · ${counts.revisionsCreated || 0} new or updated revisions · ${counts.revisionsReused || 0} unchanged revisions${counts.pullRequestsSkipped ? ` · ${counts.pullRequestsSkipped} pull requests skipped` : ''}`, 'mt-2 text-[11px] text-white/45 break-words'));
+      if (job.resultCompleteness === 'partial' || job.status === 'partial') {
+        const reason = job.checkpoints?.issues?.partialReason === 'issue_scan_limit_reached'
+          ? `Issue scan limit reached; ${counts.issuesCaptured || 0} issues were captured.`
+          : 'This sync is partial. Completed content is retained; retry is available when permitted.';
+        progress.append(node('p', reason, 'mt-2 text-xs text-amber-200'));
+      }
+      if (job.lastErrorCode) progress.append(node('p', githubSyncErrorMessage(job.lastErrorCode), 'mt-2 text-xs text-rose-200/80'));
+      if (job.retryAt && new Date(job.retryAt).getTime() > Date.now()) progress.append(node('p', `Retry available after ${new Date(job.retryAt).toLocaleTimeString()}.`, 'mt-2 text-[11px] text-amber-100/70'));
+      row.append(progress);
+    }
+
+    const activeJob = job && ['running', 'partial', 'retry_wait', 'interrupted'].includes(job.status);
+    const actions = node('div', undefined, 'mt-3 flex flex-wrap items-center gap-2');
+    if (isProjectOwner(currentProject(), state.user?.id)) {
+      if (repository.connectionStatus === 'needs_reauthorization') {
+        const authorize = node('button', 'Reauthorize GitHub', 'rounded-full bg-amber-500/15 px-3 py-1.5 text-xs text-amber-100 hover:bg-amber-500/25');
+        authorize.type = 'button'; authorize.disabled = Boolean(state.githubBusyLinkId);
+        authorize.addEventListener('click', beginGitHubAuthorization); actions.append(authorize);
+      }
+      const retryable = canRetryGitHubSync(repository, currentProject(), state.user?.id);
+      if (retryable) {
+        const retry = node('button', state.githubRetryingJobId === job?.id ? 'Retrying…' : 'Retry sync', 'rounded-full bg-amber-500/15 px-3 py-1.5 text-xs text-amber-100 hover:bg-amber-500/25 disabled:opacity-50');
+        retry.type = 'button'; retry.disabled = Boolean(state.githubRetryingJobId || state.githubBusyLinkId);
+        retry.addEventListener('click', () => retryGitHubSync(repository)); actions.append(retry);
+      }
+      if (canSyncGitHubRepository(repository, currentProject(), state.user?.id) && !activeJob) {
+        const sync = createGitHubActionButton(document, state.githubBusyLinkId === repository.id ? 'Syncing…' : job?.status === 'completed' ? 'Sync again' : 'Sync GitHub', 'rounded-full bg-sky-500/15 px-3 py-1.5 text-xs text-sky-100 hover:bg-sky-500/25 disabled:opacity-50');
+        sync.disabled = Boolean(state.githubBusyLinkId || state.githubRetryingJobId);
+        sync.addEventListener('click', () => startGitHubSync(repository)); actions.append(sync);
+      }
+    }
+    if (job?.status === 'running') {
+      const refresh = node('button', githubPollCount >= 16 ? 'Refresh status' : 'Refresh now', 'rounded-full bg-white/5 px-3 py-1.5 text-[10px] text-white/55 hover:bg-white/10');
+      refresh.type = 'button'; refresh.addEventListener('click', refreshGitHubStatus); actions.append(refresh);
+      actions.append(node('span', githubPollCount >= 16 ? 'Automatic refresh paused; saved status remains available.' : 'Status refreshes automatically for a short period.', 'text-[10px] text-white/35'));
+    }
+    row.append(actions);
+    container.append(row);
+  });
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function renderGitHubLinkingControls(container) {
+  const controls = node('section', undefined, 'rounded-xl border border-sky-300/10 bg-sky-500/[0.04] p-3 sm:p-4');
+  controls.append(node('p', 'Connect a GitHub installation and choose repositories to link to this project. Linking is always explicit.', 'text-xs text-white/55'));
+  const actions = node('div', undefined, 'mt-3 flex flex-wrap gap-2');
+  const connect = node('button', 'Connect existing installation', 'rounded-full bg-white/10 px-3 py-1.5 text-xs text-white hover:bg-white/15 disabled:opacity-50');
+  connect.type = 'button'; connect.disabled = Boolean(state.githubAuthorizing);
+  connect.addEventListener('click', beginGitHubAuthorization);
+  actions.append(connect);
+  const hasActiveInstallation = state.githubInstallations.some((item) => item.status === 'active' || (item.status === 'unverified' && item.lastKnownStatus === 'active'));
+  if (!hasActiveInstallation) {
+    const install = node('button', 'Install RELAY GitHub App', 'rounded-full bg-violet-500/15 px-3 py-1.5 text-xs text-violet-100 hover:bg-violet-500/25 disabled:opacity-50');
+    install.type = 'button'; install.disabled = Boolean(state.githubAuthorizing);
+    install.addEventListener('click', beginGitHubInstallation);
+    actions.append(install);
+    controls.append(actions, node('p', 'Use installation to install, restore, or update the RELAY GitHub App. GitHub may open its installation settings when this account already has an installation.', 'mt-2 text-[10px] text-white/35'));
+    if (!state.githubInstallations.length) { container.append(controls); return; }
+  }
+  if (hasActiveInstallation) controls.append(actions);
+  const installations = node('div', undefined, 'mt-3 space-y-2');
+  state.githubInstallations.forEach((installation) => {
+    const item = node('div', undefined, 'flex flex-col gap-2 rounded-lg border border-white/5 bg-black/10 p-3 sm:flex-row sm:items-center');
+    const info = node('div', undefined, 'min-w-0 flex-1');
+    info.append(node('p', installation.accountLogin || 'GitHub account', 'text-xs font-medium text-white/80'), node('p', `${installation.accountType || 'GitHub App installation'} · ${githubInstallationStatusLabel(installation)}`, 'mt-1 text-[10px] text-white/40'));
+    const discover = node('button', state.githubDiscoveryLoading && state.githubDiscoveryInstallationId === installation.id ? 'Loading repositories…' : 'Discover repositories', 'rounded-full bg-sky-500/15 px-3 py-1.5 text-xs text-sky-100 hover:bg-sky-500/25 disabled:opacity-50');
+    discover.type = 'button'; discover.disabled = Boolean(state.githubDiscoveryLoading);
+    discover.addEventListener('click', () => discoverGitHubRepositories(installation.id));
+    item.append(info, discover); installations.append(item);
+  });
+  controls.append(installations);
+  if (state.githubDiscoveryInstallationId) {
+    const selected = state.githubInstallations.find((item) => item.id === state.githubDiscoveryInstallationId);
+    controls.append(node('p', `Repositories available to ${selected?.accountLogin || 'selected installation'}:`, 'mt-3 text-xs text-white/65'));
+    if (state.githubDiscoveryLoading) controls.append(node('p', 'Loading repository list…', 'mt-2 text-xs text-white/40'));
+    else if (state.githubDiscoveryError) controls.append(node('p', `Could not discover repositories: ${state.githubDiscoveryError}`, 'mt-2 text-xs text-rose-200'));
+    else if (!state.githubAvailableRepositories.length) controls.append(node('p', 'No repositories are available to this installation.', 'mt-2 text-xs text-white/40'));
+    const repoList = node('div', undefined, 'mt-2 space-y-2');
+    state.githubAvailableRepositories.forEach((repository) => {
+      const linked = state.githubRepositories.some((item) => String(item.repositoryId) === String(repository.repositoryId) && item.status === 'active');
+      const row = node('div', undefined, 'flex flex-col gap-2 rounded-lg border border-white/5 bg-black/10 p-3 sm:flex-row sm:items-center');
+      row.append(node('div', `${repository.fullName} · ${repository.private ? 'Private' : 'Public'}`, 'min-w-0 flex-1 break-all text-xs text-white/75'));
+      const link = node('button', linked ? 'Already linked' : state.githubLinkingRepositoryId === repository.repositoryId ? 'Linking…' : 'Link repository', 'rounded-full bg-emerald-500/15 px-3 py-1.5 text-xs text-emerald-100 hover:bg-emerald-500/25 disabled:opacity-50');
+      link.type = 'button'; link.disabled = linked || Boolean(state.githubLinkingRepositoryId || state.githubDiscoveryLoading);
+      link.addEventListener('click', () => linkGitHubRepository(state.githubDiscoveryInstallationId, repository));
+      row.append(link); repoList.append(row);
+    });
+    controls.append(repoList);
+  }
+  container.append(controls);
+}
+
+async function loadGitHubRepositories() {
+  const projectId = state.selectedProjectId;
+  if (!projectId || state.mode !== 'real') return;
+  state.githubLoading = true; state.githubError = '';
+  renderGitHubRepositories();
+  try {
+    const result = await api(`/projects/${encodeURIComponent(projectId)}/github/repositories`);
+    if (state.selectedProjectId !== projectId) return;
+    state.githubRepositories = result.repositories || [];
+    state.githubError = '';
+    renderGitHubRepositories();
+    resumeGitHubPolling();
+  } catch (error) {
+    if (state.selectedProjectId === projectId) { state.githubError = error.message; renderGitHubRepositories(); }
+  } finally {
+    if (state.selectedProjectId === projectId) { state.githubLoading = false; renderGitHubRepositories(); }
+  }
+}
+
+async function refreshGitHubStatus() {
+  stopGitHubPolling();
+  await loadGitHubRepositories();
+}
+
+function resumeGitHubPolling() {
+  if (state.mode !== 'real' || !state.selectedProjectId || githubPollTimer) return;
+  const running = state.githubRepositories.filter((repository) => repository.latestSyncJob?.status === 'running');
+  if (!running.length || githubPollCount >= 16) return;
+  const generation = githubPollGeneration;
+  const projectId = state.selectedProjectId;
+  githubPollTimer = window.setTimeout(async () => {
+    githubPollTimer = null;
+    if (generation !== githubPollGeneration || projectId !== state.selectedProjectId) return;
+    const controller = new AbortController(); githubPollController = controller;
+    await Promise.all(running.map(async (repository) => {
+      const jobId = repository.latestSyncJob.id;
+      try {
+        const result = await api(`/projects/${encodeURIComponent(projectId)}/github/sync-jobs/${encodeURIComponent(jobId)}`, { signal: controller.signal });
+        if (generation !== githubPollGeneration || projectId !== state.selectedProjectId) return;
+        const target = state.githubRepositories.find((item) => item.id === repository.id);
+        if (target && target.latestSyncJob?.id === jobId) target.latestSyncJob = result.job;
+      } catch (error) {
+        if (error.name !== 'AbortError' && generation === githubPollGeneration) console.info('[RELAY GITHUB STATUS]', { status: error.status || 'network-error' });
+      }
+    }));
+    if (generation !== githubPollGeneration) return;
+    githubPollController = null; githubPollCount += 1;
+    renderGitHubRepositories();
+    if (!state.githubRepositories.some((repository) => repository.latestSyncJob?.status === 'running')) {
+      // Refresh source metadata after terminal completion, partial completion or failure.
+      loadGitHubRepositories();
+      api(`/projects/${encodeURIComponent(projectId)}/sources`).then((data) => {
+        if (projectId === state.selectedProjectId) { state.sources = data.sources || []; renderSources(); }
+      }).catch(() => {});
+      return;
+    }
+    resumeGitHubPolling();
+  }, 2500);
+}
+
+async function startGitHubSync(repository) {
+  if (!canSyncGitHubRepository(repository, currentProject(), state.user?.id) || state.githubBusyLinkId || state.githubRetryingJobId) return;
+  const projectId = state.selectedProjectId;
+  state.githubBusyLinkId = repository.id; renderGitHubRepositories();
+  try {
+    let settled = false;
+    const request = api(`/projects/${encodeURIComponent(projectId)}/github/repositories/${encodeURIComponent(repository.id)}/sync`, { method: 'POST', body: '{}' })
+      .then((value) => { settled = true; return value; }, (error) => { settled = true; throw error; });
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    if (!settled && projectId === state.selectedProjectId) await loadGitHubRepositories();
+    const result = await request;
+    if (projectId !== state.selectedProjectId) return;
+    repository.latestSyncJob = result.job;
+    state.githubBusyLinkId = '';
+    renderGitHubRepositories();
+    if (result.job.status === 'running') { toast('GitHub sync is running. You can leave and return to recover its status.'); resumeGitHubPolling(); }
+    else toast(githubSyncStatusLabel(result.job) === 'Partial' ? 'GitHub sync completed with partial coverage.' : 'GitHub sync completed. AI analysis was not started.');
+    const sources = await api(`/projects/${encodeURIComponent(projectId)}/sources`);
+    if (projectId === state.selectedProjectId) { state.sources = sources.sources || []; renderSources(); }
+    await loadGitHubRepositories();
+  } catch (error) {
+    if (projectId === state.selectedProjectId) {
+      state.githubBusyLinkId = '';
+      toast(error.status === 409 ? 'A sync is already active or this repository is no longer available.' : githubSyncErrorMessage(error.code), 'error');
+      renderGitHubRepositories();
+    }
+  }
+}
+
+async function retryGitHubSync(repository) {
+  if (!canRetryGitHubSync(repository, currentProject(), state.user?.id) || state.githubRetryingJobId || state.githubBusyLinkId) return;
+  const projectId = state.selectedProjectId; const jobId = repository.latestSyncJob.id;
+  state.githubRetryingJobId = jobId; renderGitHubRepositories();
+  try {
+    let settled = false;
+    const request = api(`/projects/${encodeURIComponent(projectId)}/github/sync-jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST', body: '{}' })
+      .then((value) => { settled = true; return value; }, (error) => { settled = true; throw error; });
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    if (!settled && projectId === state.selectedProjectId) await loadGitHubRepositories();
+    const result = await request;
+    if (projectId !== state.selectedProjectId) return;
+    repository.latestSyncJob = result.job;
+    state.githubRetryingJobId = '';
+    renderGitHubRepositories();
+    if (result.job.status === 'running') { toast('GitHub sync retry is running.'); resumeGitHubPolling(); }
+    else toast(githubSyncStatusLabel(result.job) === 'Partial' ? 'GitHub sync remains partial.' : 'GitHub sync retry completed.');
+    await loadGitHubRepositories();
+  } catch (error) {
+    if (projectId === state.selectedProjectId) {
+      state.githubRetryingJobId = '';
+      toast(error.status === 409 ? 'This sync is not ready to retry. Refresh its status.' : githubSyncErrorMessage(error.code), 'error');
+      renderGitHubRepositories();
+    }
+  }
+}
+
+async function beginGitHubAuthorization() {
+  if (!isCurrentProjectOwner(currentProject(), state.user?.id) || state.mode !== 'real' || state.githubAuthorizing) return;
+  state.githubAuthorizing = true; renderGitHubRepositories();
+  try {
+    const result = await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/github/installations/authorize`, { method: 'POST', body: '{}' });
+    navigateToGitHub(result.authorizationUrl);
+  } catch (error) { state.githubAuthorizing = false; renderGitHubRepositories(); toast(`Could not start GitHub authorization: ${error.message}`, 'error'); }
+}
+
+async function beginGitHubInstallation() {
+  if (!isCurrentProjectOwner(currentProject(), state.user?.id) || state.mode !== 'real' || state.githubAuthorizing) return;
+  state.githubAuthorizing = true; renderGitHubRepositories();
+  try {
+    const result = await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/github/installations/start`, { method: 'POST', body: '{}' });
+    navigateToGitHub(result.installationUrl);
+  } catch (error) { state.githubAuthorizing = false; renderGitHubRepositories(); toast(`Could not start GitHub App installation: ${error.message}`, 'error'); }
+}
+
+function navigateToGitHub(rawUrl) {
+  const url = new URL(rawUrl);
+  if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.username || url.password) throw new Error('GitHub returned an unsafe authorization URL.');
+  window.location.assign(url.href);
+}
+
+async function discoverGitHubRepositories(installationId) {
+  if (!isCurrentProjectOwner(currentProject(), state.user?.id) || state.githubDiscoveryLoading) return;
+  const projectId = state.selectedProjectId;
+  state.githubDiscoveryInstallationId = installationId;
+  state.githubAvailableRepositories = [];
+  state.githubDiscoveryError = '';
+  state.githubDiscoveryLoading = true;
+  try {
+    renderGitHubRepositories();
+    const result = await api(`/projects/${encodeURIComponent(projectId)}/github/repositories?installationId=${encodeURIComponent(installationId)}`);
+    if (state.selectedProjectId !== projectId) return;
+    if (!Array.isArray(result.repositories)) throw new Error('GitHub returned an invalid repository list.');
+    state.githubAvailableRepositories = result.repositories;
+  } catch (error) {
+    if (state.selectedProjectId === projectId) state.githubDiscoveryError = error.message;
+  } finally {
+    if (state.selectedProjectId === projectId) { state.githubDiscoveryLoading = false; renderGitHubRepositories(); }
+  }
+}
+
+async function linkGitHubRepository(installationId, repository) {
+  if (!isCurrentProjectOwner(currentProject(), state.user?.id) || state.githubLinkingRepositoryId) return;
+  const projectId = state.selectedProjectId;
+  state.githubLinkingRepositoryId = String(repository.repositoryId);
+  renderGitHubRepositories();
+  try {
+    await api(`/projects/${encodeURIComponent(projectId)}/github/repositories`, {
+      method: 'POST', body: JSON.stringify({ installationId, repositoryId: repository.repositoryId }),
+    });
+    toast(`${repository.fullName} linked to this project.`);
+    await loadProjectData();
+    await discoverGitHubRepositories(installationId);
+  } catch (error) {
+    if (state.selectedProjectId === projectId) toast(error.status === 409 ? 'This repository is already linked to the project.' : `Could not link repository: ${error.message}`, 'error');
+  } finally {
+    state.githubLinkingRepositoryId = '';
+    renderGitHubRepositories();
+  }
+}
+
+async function toggleGitHubSourceText(source, actions) {
+  const prior = actions.querySelector('[data-source-text]');
+  if (prior) { prior.remove(); return; }
+  const panel = node('div', 'Loading captured source text…', 'mt-3 w-full rounded-xl bg-black/20 p-3 text-xs text-white/45');
+  panel.dataset.sourceText = 'true';
+  actions.after(panel);
+  const projectId = state.selectedProjectId;
+  try {
+    const data = await api(`/sources/${encodeURIComponent(source._id)}/content`);
+    if (projectId !== state.selectedProjectId || !panel.isConnected) return;
+    const pre = node('pre', data.source?.extractedText || 'No captured text is available.', 'max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-white/70');
+    panel.replaceChildren(node('p', 'Captured GitHub text · displayed as plain text', 'mb-2 text-[10px] font-mono uppercase tracking-wider text-sky-200/70'), pre);
+  } catch (error) {
+    if (panel.isConnected) panel.textContent = `Could not load captured text: ${error.message}`;
+  }
+}
+
+async function toggleGitHubRevisionHistory(source, actions) {
+  const prior = actions.querySelector('[data-revision-history]');
+  if (prior) { prior.remove(); return; }
+  const panel = node('div', 'Loading revision history…', 'mt-3 w-full rounded-xl bg-black/20 p-3 text-xs text-white/45');
+  panel.dataset.revisionHistory = 'true';
+  actions.after(panel);
+  const projectId = state.selectedProjectId;
+  try {
+    let data = state.sourceRevisionCache[source._id];
+    if (!data) {
+      data = await api(`/sources/${encodeURIComponent(source._id)}/revisions?limit=20`);
+      state.sourceRevisionCache[source._id] = data;
+    }
+    if (projectId !== state.selectedProjectId || !panel.isConnected) return;
+    clear(panel);
+    panel.append(node('p', `${data.total} captured revision(s) · text snapshots remain immutable`, 'mb-2 text-[10px] font-mono uppercase tracking-wider text-sky-200/70'));
+    if (!data.revisions?.length) panel.append(node('p', 'No revision metadata is available.', 'text-xs text-white/45'));
+    (data.revisions || []).forEach((revision) => {
+      const item = node('div', undefined, 'border-t border-white/5 py-2 first:border-0');
+      item.append(node('p', `${revision.isCurrent ? 'CURRENT' : revision.isAnalyzed ? 'ANALYZED' : 'HISTORICAL'} · ${String(revision.revisionKey || revision._id).slice(0, 42)}`, 'font-mono text-[10px] text-white/65 break-all'));
+      const locator = revision.locator || {};
+      const provenance = [locator.repositoryFullName, locator.path, locator.issueNumber ? `Issue #${locator.issueNumber}` : '', locator.commitSha ? `Commit ${String(locator.commitSha).slice(0, 12)}` : ''].filter(Boolean).join(' · ');
+      item.append(node('p', `${provenance || 'GitHub source'}${revision.capturedAt ? ` · captured ${new Date(revision.capturedAt).toLocaleString()}` : ''}`, 'mt-1 text-[11px] text-white/40 break-words'));
+      if (locator.truncated) item.append(node('p', `Truncated · ${locator.contentBytes || 0} bytes stored from ${locator.originalBytes || 0} bytes`, 'mt-1 text-[10px] text-amber-200'));
+      panel.append(item);
+    });
+  } catch (error) {
+    if (panel.isConnected) panel.textContent = `Could not load revision history: ${error.message}`;
+  }
 }
 
 async function handleUpload(files) {
@@ -603,7 +1303,7 @@ function renderFindings() {
   });
   if (!items.length) { setStatus(container, 'No findings match these filters.'); return; }
   items.forEach((finding) => {
-    const card = node('article', undefined, 'glass rounded-2xl p-4 card-hover');
+    const card = node('article', undefined, 'finding-card glass rounded-2xl p-4 card-hover');
     const top = node('div', undefined, 'flex items-start justify-between gap-2');
     top.append(node('span', finding.category, 'text-[11px] font-mono tracking-widest px-2 py-1 rounded-full border bg-violet-500/15 text-violet-300 border-violet-500/30'));
     top.append(node('span', findingStatus(finding.status), 'text-xs px-2 py-1 rounded-full bg-white/10 text-white/70'));
@@ -615,6 +1315,11 @@ function renderFindings() {
       const quote = node('blockquote', `“${evidence.quote || 'No supporting quote returned.'}”`, 'mt-3 border-l-2 border-violet-500/50 pl-3 text-xs text-white/60');
       quote.title = `${sourceName}${evidence.section ? ` · ${evidence.section}` : ''}`;
       card.append(node('p', sourceName, 'mt-3 text-xs text-violet-300'), quote);
+      if (evidence.sourceRevision) {
+        const locator = evidence.locator || {};
+        const origin = [locator.repositoryFullName, locator.path, locator.issueNumber ? `Issue #${locator.issueNumber}` : '', locator.commitSha ? `Commit ${String(locator.commitSha).slice(0, 12)}` : ''].filter(Boolean).join(' · ');
+        card.append(node('p', `GitHub revision ${String(evidence.sourceRevision._id || evidence.sourceRevision).slice(-8)}${origin ? ` · ${origin}` : ''}`, 'mt-1 text-[10px] font-mono text-sky-200/60 break-words'));
+      }
     });
     const evidenceButton = node('button', 'View evidence', 'mt-4 rounded-full bg-white/10 px-4 py-2 text-xs text-white hover:bg-white/15 transition');
     evidenceButton.type = 'button';
@@ -625,6 +1330,7 @@ function renderFindings() {
 }
 
 function renderReview() {
+  renderContradictions();
   const container = byId('reviewList');
   if (!container) return;
   clear(container);
@@ -638,7 +1344,7 @@ function renderReview() {
     button.classList.toggle('bg-white/10', !active); button.classList.toggle('text-white/70', !active);
   });
   filtered.forEach((finding) => {
-    const row = node('article', undefined, 'glass rounded-2xl p-4');
+    const row = node('article', undefined, 'review-card glass rounded-2xl p-4');
     row.append(node('p', `${finding.category} · ${findingStatus(finding.status)}`, 'text-xs text-violet-300'), node('h3', finding.title, 'text-white font-semibold mt-2'), node('p', finding.description, 'text-white/50 text-sm mt-1'));
     (finding.evidence || []).forEach((item) => {
       const evidence = node('div', undefined, 'mt-3 rounded-xl bg-white/[0.03] border border-white/5 p-3');
@@ -649,8 +1355,14 @@ function renderReview() {
     const actions = node('div', undefined, 'mt-4 flex flex-wrap gap-2');
     if (state.mode === 'demo') {
       actions.append(node('span', 'DEMO DATA · Review actions are disabled in the sample workspace.', 'text-xs text-violet-300/75'));
-    } else if (!canManageCurrentProject()) {
-      actions.append(node('span', 'Read-only · Project owner or editor access is required to review findings.', 'text-xs text-white/40'));
+    } else if (!canReviewFindingInCurrentProject(finding)) {
+      const assignedMode = currentProject()?.workflowPolicy?.reviewMode === 'assigned';
+      const reason = state.assignmentError
+        ? `Read-only · Could not verify workflow assignments: ${state.assignmentError}`
+        : assignedMode
+          ? 'Read-only · An active reviewer assignment for this finding is required.'
+          : 'Read-only · Project owner or editor access is required to review findings.';
+      actions.append(node('span', reason, 'text-xs text-white/40'));
     } else {
       if (finding.status === 'pending') {
         const approve = reviewButton('Approve', 'bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30', () => confirmApproveFinding(finding._id));
@@ -672,6 +1384,127 @@ function renderReview() {
   });
 }
 
+function canReviewContradiction(candidate) {
+  return canReviewContradictionForUser({ mode: state.mode, project: currentProject(), userId: state.user?.id, assignments: state.assignments, candidate });
+}
+
+function canReadProjectAudit() {
+  return canReadProjectAuditForUser({ mode: state.mode, project: currentProject(), userId: state.user?.id, assignments: state.assignments });
+}
+
+function renderContradictions() {
+  renderContradictionList('contradictionList', 'detectContradictionsButton');
+  renderContradictionList('projectContradictionList', 'projectDetectContradictionsButton');
+}
+
+function renderContradictionList(containerId, detectButtonId) {
+  const container = byId(containerId);
+  if (!container) return;
+  clear(container);
+  const detect = byId(detectButtonId);
+  if (detect) detect.classList.toggle('hidden', state.mode === 'demo' || !canManageCurrentProject());
+  if (state.mode === 'demo') { setStatus(container, 'DEMO DATA · Contradiction review is available in authenticated projects.'); return; }
+  if (!state.selectedProjectId) { setStatus(container, 'Select a project to review contradiction candidates.'); return; }
+  if (state.contradictionError) { setStatus(container, `Could not load contradiction candidates: ${state.contradictionError}`, 'error'); return; }
+  if (!state.contradictions.length) { setStatus(container, 'No candidates yet. Check approved findings after analyzing sources.'); return; }
+  state.contradictions.forEach((candidate) => {
+    const confirmed = candidate.status === 'confirmed_conflict';
+    const card = node('article', undefined, `contradiction-card rounded-xl border p-4 ${confirmed ? 'border-rose-300/30 bg-rose-500/[0.07]' : 'border-amber-300/15 bg-white/[0.025]'}`);
+    const heading = node('div', undefined, 'flex flex-wrap items-center justify-between gap-2');
+    heading.append(node('h3', (candidate.claims || []).map((claim) => claim.finding?.title || claim.summary).join(' ↔ ') || 'Contradiction candidate', 'text-sm font-semibold text-white break-words'));
+    heading.append(node('span', contradictionStatusLabel(candidate.status), `rounded-full px-2.5 py-1 text-[10px] font-mono ${confirmed ? 'bg-rose-500/20 text-rose-200' : candidate.status === 'dismissed' ? 'bg-white/10 text-white/45' : 'bg-amber-500/15 text-amber-200'}`));
+    card.append(heading, node('p', confirmed ? 'Human-confirmed conflict · included only in newly generated handovers.' : 'Unconfirmed suggestion · excluded from handovers until an authorized reviewer confirms it.', 'mt-2 text-xs text-white/50'));
+    if (candidate.explanation) card.append(node('p', candidate.explanation, 'mt-2 text-xs leading-relaxed text-white/65'));
+    const evidenceList = node('div', undefined, 'mt-3 grid gap-2 md:grid-cols-2');
+    (candidate.evidence || []).forEach((item) => {
+      const provenance = contradictionEvidenceView(item);
+      const evidence = node('div', undefined, 'rounded-lg border border-white/5 bg-black/15 p-3');
+      evidence.append(node('p', `${provenance.sourceName}${provenance.locator ? ` · ${provenance.locator}` : ''}`, 'text-xs font-medium text-sky-200 break-words'));
+      evidence.append(node('p', `Immutable revision · ${String(provenance.revisionKey).slice(0, 80)}`, 'mt-1 font-mono text-[10px] text-white/45 break-all'));
+      evidence.append(node('p', provenance.verified ? 'Verified exact source passage' : 'Evidence reference', `mt-2 text-[10px] font-mono ${provenance.verified ? 'text-emerald-300' : 'text-amber-200'}`));
+      evidence.append(node('blockquote', provenance.verifiedText, 'mt-1 border-l-2 border-violet-500/50 pl-2 text-xs text-white/70 whitespace-pre-wrap break-words'));
+      evidenceList.append(evidence);
+    });
+    card.append(evidenceList);
+    if (candidate.reviewReason) {
+      const actor = candidate.reviewedBy?.name || candidate.reviewedBy?.email || 'Project reviewer';
+      card.append(node('p', `Latest review · ${actor}${candidate.reviewedAt ? ` · ${new Date(candidate.reviewedAt).toLocaleString()}` : ''}`, 'mt-3 text-[10px] text-white/45'));
+      card.append(node('p', candidate.reviewReason, 'mt-1 text-xs text-white/65 whitespace-pre-wrap'));
+    }
+    const actions = node('div', undefined, 'mt-3 flex flex-wrap items-center gap-2');
+    if (['candidate', 'in_review'].includes(candidate.status) && canReviewContradiction(candidate)) {
+      const confirm = reviewButton(state.contradictionBusyId === candidate._id ? 'Saving…' : 'Confirm conflict', 'bg-rose-500/20 text-rose-100 hover:bg-rose-500/30', () => reviewContradiction(candidate._id, 'confirmed_conflict'));
+      const dismiss = reviewButton('Dismiss', 'bg-white/10 text-white/75 hover:bg-white/15', () => reviewContradiction(candidate._id, 'dismissed'));
+      confirm.disabled = dismiss.disabled = Boolean(state.contradictionBusyId);
+      actions.append(confirm, dismiss);
+    } else if (['candidate', 'in_review'].includes(candidate.status)) {
+      actions.append(node('span', 'Read only · a reviewer assignment covering both claim categories is required.', 'text-xs text-white/40'));
+    }
+    if (canReadProjectAudit()) {
+      const historyButton = reviewButton(state.contradictionHistory[candidate._id]?.open ? 'Hide review history' : 'Review history', 'bg-white/5 text-white/70 hover:bg-white/10', () => toggleContradictionHistory(candidate._id));
+      actions.append(historyButton);
+    }
+    card.append(actions);
+    const history = state.contradictionHistory[candidate._id];
+    if (history?.open) {
+      const historyPanel = node('div', undefined, 'mt-3 space-y-2 rounded-lg bg-black/15 p-3');
+      if (history.loading) historyPanel.append(node('p', 'Loading review history…', 'text-xs text-white/45'));
+      else if (history.error) historyPanel.append(node('p', `Could not load review history: ${history.error}`, 'text-xs text-rose-200'));
+      else if (!history.events?.length) historyPanel.append(node('p', 'No review events recorded.', 'text-xs text-white/45'));
+      else history.events.forEach((event) => historyPanel.append(node('p', `${event.action.replace('contradiction.', '')} · ${event.actorId?.name || event.actorId?.email || 'RELAY user'} · ${new Date(event.createdAt).toLocaleString()}${event.reason ? `\n${event.reason}` : ''}`, 'border-l border-violet-400/30 pl-3 text-xs text-white/65 whitespace-pre-wrap')));
+      card.append(historyPanel);
+    }
+    container.append(card);
+  });
+}
+
+async function reviewContradiction(candidateId, status) {
+  if (!canReviewContradiction(state.contradictions.find((candidate) => candidate._id === candidateId))) return;
+  const [rationale] = await accessibleFormDialog({
+    title: status === 'confirmed_conflict' ? 'Confirm suspected conflict' : 'Dismiss suspected conflict',
+    description: 'Your rationale is recorded in the project review history.',
+    fields: [{ label: 'Reviewer rationale', required: true, maxLength: 2000, placeholder: 'Explain how the evidence supports your decision.' }],
+    submitLabel: status === 'confirmed_conflict' ? 'Confirm conflict' : 'Dismiss candidate',
+    danger: status !== 'confirmed_conflict',
+  }) || [];
+  if (rationale === undefined) return;
+  const checkedRationale = validateReviewerRationale(rationale);
+  if (!checkedRationale.valid) { toast('Reviewer rationale must contain 1–2,000 characters.', 'error'); return; }
+  state.contradictionBusyId = candidateId; renderContradictions();
+  try {
+    await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/contradictions/${encodeURIComponent(candidateId)}/review`, { method: 'POST', body: JSON.stringify({ status, reason: checkedRationale.value }) });
+    const refreshed = await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/contradictions`);
+    state.contradictions = refreshed.candidates || [];
+    toast(status === 'confirmed_conflict' ? 'Conflict confirmed by human review.' : 'Candidate dismissed.');
+  } catch (error) { toast(`Could not save contradiction review: ${error.message}`, 'error'); }
+  finally { state.contradictionBusyId = ''; renderContradictions(); }
+}
+
+async function detectContradictions() {
+  if (!canManageCurrentProject() || state.mode !== 'real') return;
+  const buttons = [byId('detectContradictionsButton'), byId('projectDetectContradictionsButton')].filter(Boolean);
+  buttons.forEach((button) => { button.disabled = true; button.textContent = 'Checking…'; });
+  state.contradictionError = '';
+  try {
+    const result = await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/contradictions/detect`, { method: 'POST', body: '{}' });
+    const refreshed = await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/contradictions`);
+    state.contradictions = refreshed.candidates || [];
+    toast(result.createdCount ? `${result.createdCount} suspected candidate(s) need human review.` : 'No new contradiction candidates were found.');
+  } catch (error) { state.contradictionError = error.message; toast(`Could not check for contradictions: ${error.message}`, 'error'); }
+  finally { buttons.forEach((button) => { button.disabled = false; button.textContent = 'Check approved findings'; }); renderContradictions(); }
+}
+
+async function toggleContradictionHistory(candidateId) {
+  const existing = state.contradictionHistory[candidateId];
+  if (existing?.open) { state.contradictionHistory[candidateId] = { ...existing, open: false }; renderContradictions(); return; }
+  state.contradictionHistory[candidateId] = { open: true, loading: true, events: [] }; renderContradictions();
+  try {
+    const data = await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/contradictions/${encodeURIComponent(candidateId)}/history`);
+    state.contradictionHistory[candidateId] = { open: true, loading: false, events: data.events || [] };
+  } catch (error) { state.contradictionHistory[candidateId] = { open: true, loading: false, error: error.message, events: [] }; }
+  renderContradictions();
+}
+
 function reviewButton(label, classes, handler) {
   const button = node('button', label, `rounded-full px-3 py-2 text-xs transition ${classes}`);
   button.type = 'button';
@@ -686,6 +1519,24 @@ function canManageCurrentProject() {
   if (!project || !state.user?.id) return false;
   if (String(project.owner) === String(state.user.id)) return true;
   return (project.members || []).some((member) => String(member.user?._id || member.user) === String(state.user.id) && member.role === 'editor');
+}
+
+function currentProject() {
+  return state.projects.find((item) => item._id === state.selectedProjectId) || null;
+}
+
+function canReviewFindingInCurrentProject(finding) {
+  if (state.mode !== 'real' || !finding || !state.user?.id) return false;
+  const project = currentProject();
+  if (!project) return false;
+  if (project.workflowPolicy?.reviewMode !== 'assigned') return canManageCurrentProject();
+  const userId = String(state.user.id);
+  return state.assignments.some((assignment) => {
+    if (assignment.role !== 'reviewer' || assignment.status !== 'active') return false;
+    if (String(assignment.user?._id || assignment.user) !== userId) return false;
+    return assignment.scopeType === 'project'
+      || (assignment.scopeType === 'category' && assignment.scopeValue === finding.category);
+  });
 }
 
 function refreshProjectControls() {
@@ -710,6 +1561,7 @@ function refreshProjectControls() {
   const note = byId('sourcePermissionNote');
   if (note) note.textContent = state.mode === 'demo' ? 'DEMO DATA · Uploads and analysis are not connected in the sample workspace.' : allowed ? 'Owners and editors can upload sources and run analysis.' : 'Read-only access · Ask the project owner to grant Editor access to upload or run analysis.';
   renderAnalysisJob();
+  renderAnalysisSelectionCount();
 }
 
 async function submitReviewAction(findingId, action, payload = {}) {
@@ -731,15 +1583,15 @@ async function submitReviewAction(findingId, action, payload = {}) {
   finally { state.reviewBusy = false; renderReview(); }
 }
 
-function confirmApproveFinding(findingId) {
-  if (window.confirm('Approve this finding? This records a permanent review decision.')) submitReviewAction(findingId, 'approve');
+async function confirmApproveFinding(findingId) {
+  if (await confirmInApp('Approve this finding? This decision will be recorded in the review history.', 'Approve finding')) submitReviewAction(findingId, 'approve');
 }
 
 let commentFindingId = '';
 let commentAction = '';
-function requestFindingComment(findingId, action) {
+async function requestFindingComment(findingId, action) {
   if (state.mode !== 'real') return;
-  if (action === 'reject' && !window.confirm('Reject this finding? A reason is required and this action will be recorded in review history.')) return;
+  if (action === 'reject' && !await confirmInApp('Reject this finding? A reason is required and will be recorded in the review history.', 'Reject finding', true)) return;
   commentFindingId = findingId; commentAction = action;
   const rejection = action === 'reject';
   const reopening = action === 'reopen';
@@ -757,9 +1609,13 @@ function requestFindingComment(findingId, action) {
 
 function openReviewEdit(findingId) {
   const finding = state.findings.find((item) => item._id === findingId);
-  if (!finding || !canManageCurrentProject()) return;
+  if (!finding || !canReviewFindingInCurrentProject(finding)) return;
   byId('reviewEditTitleInput').value = finding.title || '';
-  byId('reviewEditCategory').value = finding.category || 'Decision';
+  const categorySelect = byId('reviewEditCategory');
+  [...categorySelect.options].forEach((option) => {
+    option.disabled = option.value !== finding.category && !canReviewFindingInCurrentProject({ ...finding, category: option.value });
+  });
+  categorySelect.value = finding.category || 'Decision';
   byId('reviewEditDescription').value = finding.description || '';
   byId('reviewEditHint').textContent = finding.status === 'needs_clarification' ? 'Saving your update returns this finding to pending review. Evidence is preserved as-is.' : 'Update the finding before approval. Evidence is preserved as-is.';
   byId('reviewEditError').classList.add('hidden');
@@ -1106,16 +1962,20 @@ async function simulateAnalyze() {
   if (state.analysisJob?.status === 'failed') { await retryCurrentAnalysisJob(); return; }
   if (state.analysisJob && ['queued', 'running', 'retry_wait'].includes(state.analysisJob.status)) { runAnalysisJob(state.analysisJob._id); return; }
   if (!state.sources.some((source) => source.status === 'processed')) { toast('Upload at least one processed document before analysis.', 'error'); return; }
+  const selectedSourceIds = [...state.analysisSelection].filter((sourceId) => state.sources.some((source) => String(source._id) === sourceId && source.status === 'processed'));
   const projectId = state.selectedProjectId;
   state.analysisStarting = true; state.analysisJobError = '';
   navigate('findings'); renderAnalysisJob();
   try {
-    const data = await api(`/projects/${encodeURIComponent(projectId)}/analyze`, { method: 'POST', body: '{}' });
+    const data = await api(`/projects/${encodeURIComponent(projectId)}/analyze`, {
+      method: 'POST', body: JSON.stringify(selectedSourceIds.length ? { sourceIds: selectedSourceIds } : {}),
+    });
     if (state.selectedProjectId !== projectId) return;
+    if (selectedSourceIds.length) state.analysisSelection = new Set();
     state.analysisJob = data.job || null;
     renderAnalysisJob();
     if (state.analysisJob) await runAnalysisJob(state.analysisJob._id);
-    else { toast(data.message || 'All processed sources have already been analyzed.'); await loadProjectData(); }
+    else { toast(data.message || 'All selected processed sources have already been analyzed.'); await loadProjectData(); }
   } catch (error) { state.analysisJobError = error.message; renderAnalysisJob(); toast(`Could not start analysis: ${error.message}`, 'error'); }
   finally { state.analysisStarting = false; renderAnalysisJob(); }
 }
@@ -1139,12 +1999,12 @@ function renderAll() {
 
 function renderDashboard() {
   const activeProject = state.projects.find((project) => project._id === state.selectedProjectId);
-  const approved = state.findings.filter((finding) => finding.status === 'approved').length;
-  const pending = state.findings.filter((finding) => finding.status === 'pending').length;
   const evidenceCount = state.findings.reduce((total, finding) => total + (finding.evidence || []).length, 0);
   const confidence = state.findings.length ? Math.round(state.findings.reduce((total, finding) => total + (Number(finding.confidence) || 0), 0) / state.findings.length * 100) : null;
   const put = (id, text) => { const el = byId(id); if (el) el.textContent = String(text); };
-  put('dashboardProjectCount', state.projects.length);
+  const metrics = dashboardMetrics(state.projects, state.findings);
+  const { activeProjects, inReviewProjects, completedProjects, recoveryProjects, pendingFindings: pending, approvedFindings: approved } = metrics;
+  put('dashboardProjectCount', state.errors.projects ? '—' : activeProjects);
   put('dashboardSourceCount', state.errors.sources ? '—' : state.sources.length);
   put('dashboardFindingCount', state.errors.findings ? '—' : state.findings.length);
   put('dashboardPendingCount', state.errors.findings ? 'Findings unavailable' : `${pending} pending review`);
@@ -1155,21 +2015,29 @@ function renderDashboard() {
   put('reviewApprovedCount', `${reviewUnavailable}${reviewUnavailable ? '' : approved} Approved`);
   put('reviewRejectedCount', `${reviewUnavailable}${reviewUnavailable ? '' : state.findings.filter((finding) => finding.status === 'rejected').length} Rejected`);
   put('reviewClarificationCount', `${reviewUnavailable}${reviewUnavailable ? '' : state.findings.filter((finding) => finding.status === 'needs_clarification').length} Needs Clarification`);
-  put('dashboardReadiness', state.errors.findings ? '—' : `${state.findings.length ? Math.round(approved / state.findings.length * 100) : 0}%`);
+  put('dashboardReadiness', state.errors.findings || !state.findings.length ? '—' : `${Math.round(approved / state.findings.length * 100)}%`);
   const readinessRing = byId('dashboardReadinessRing');
-  if (readinessRing) readinessRing.setAttribute('stroke-dasharray', `${state.findings.length ? Math.round(approved / state.findings.length * 100) : 0} 100`);
+  if (readinessRing) readinessRing.setAttribute('stroke-dasharray', `${!state.errors.findings && state.findings.length ? Math.round(approved / state.findings.length * 100) : 0} 100`);
   put('dashboardExtractedCount', state.findings.length);
   put('dashboardEvidenceCount', evidenceCount);
   put('dashboardConfidence', confidence === null ? '—' : `${confidence}%`);
   put('dashboardAccount', state.user?.email || state.user?.name || 'Signed in');
-  put('dashboardCurrentProject', activeProject ? `${activeProject.name} · ${activeProject.status || 'active'}` : 'Select a project to view its summary.');
+  put('dashboardCurrentProject', activeProject ? `${activeProject.name} · ${activeProject.deletionState || activeProject.status || 'active'}` : 'Select a project to view its summary.');
   put('workspaceAccount', state.user?.email || state.user?.name || 'Signed in');
-  put('workspaceSelectedProject', activeProject ? `${activeProject.name} · ${activeProject.status || 'active'}` : 'Choose a project');
-  put('dashboardSummary', state.errors.projects ? `Could not load workspace: ${state.errors.projects}` : activeProject ? `${activeProject.name}: ${state.errors.sources ? 'sources unavailable' : `${state.sources.length} source(s)`}, ${state.errors.findings ? 'findings unavailable' : `${state.findings.length} finding(s)`}.` : state.projects.length ? 'Select a project to review its sources and findings.' : 'Create a project to begin your first handover.');
+  put('workspaceSelectedProject', activeProject ? `${activeProject.name} · ${activeProject.deletionState || activeProject.status || 'active'}` : 'Choose a project');
+  const avatar = (state.user?.name || state.user?.email || 'U').split(/[\s@]+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join('') || 'U';
+  put('topbarAvatar', avatar);
+  put('dashboardSummary', state.errors.projects ? `Could not load workspace: ${state.errors.projects}` : activeProject ? `${activeProject.name}: ${state.errors.sources ? 'sources unavailable' : `${state.sources.length} source(s)`}, ${state.errors.findings ? 'findings unavailable' : `${state.findings.length} finding(s)`}.` : activeProjects ? 'Select a project to review its sources and findings.' : recoveryProjects ? `${recoveryProjects} project(s) are in the deletion recovery lifecycle.` : 'Create a project to begin your first handover.');
   const badges = byId('dashboardProjectCount')?.closest('.glass')?.querySelector('.mt-3.flex');
-  if (badges) { clear(badges); badges.append(node('span', activeProject?.status || 'No project selected', 'px-2 py-1 rounded-full bg-emerald-500/15 text-emerald-400 text-[11px]')); }
-  const sourceBar = document.querySelector('#view-dashboard .bg-sky-500.rounded-full');
-  if (sourceBar) sourceBar.style.width = state.errors.sources ? '0%' : `${Math.min(100, state.sources.length * 10)}%`;
+  if (badges) {
+    clear(badges);
+    badges.append(node('span', `${inReviewProjects} in review`, 'px-2 py-1 rounded-full bg-amber-500/15 text-amber-200 text-[11px]'));
+    badges.append(node('span', `${completedProjects} completed`, 'px-2 py-1 rounded-full bg-emerald-500/15 text-emerald-400 text-[11px]'));
+    if (recoveryProjects) badges.append(node('span', `${recoveryProjects} in recovery`, 'px-2 py-1 rounded-full bg-rose-500/15 text-rose-200 text-[11px]'));
+  }
+  const sourceBar = document.querySelector('#view-dashboard .dashboard-source-progress');
+  const processedSources = state.sources.filter((source) => source.status === 'processed').length;
+  if (sourceBar) sourceBar.style.width = state.errors.sources || !state.sources.length ? '0%' : `${Math.round(processedSources / state.sources.length * 100)}%`;
   const progress = byId('dashboardProgress');
   if (progress) {
     clear(progress);
@@ -1179,16 +2047,45 @@ function renderDashboard() {
   const activity = byId('recentActivity');
   if (activity) {
     clear(activity);
-    const latest = [...state.sources].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 4);
-    if (!latest.length) activity.append(node('p', activeProject ? 'No source activity yet.' : 'Select a project to view activity.', 'text-sm text-white/45'));
-    latest.forEach((source) => activity.append(node('p', `${statusLabel(source.status)} · ${source.originalName}`, 'text-sm text-white/65')));
+    if (state.dashboardAuditEvents.length) {
+      state.dashboardAuditEvents.slice(0, 5).forEach((event) => {
+        const row = node('div', undefined, 'flex items-start gap-3 border-b border-white/5 pb-3 last:border-0');
+        row.append(node('span', '', 'mt-1.5 h-2 w-2 shrink-0 rounded-full bg-violet-500'));
+        row.append(node('div', `${String(event.action || 'Project activity').replaceAll('.', ' ')} · ${new Date(event.createdAt).toLocaleString()}`, 'text-xs leading-5 text-white/65'));
+        activity.append(row);
+      });
+    } else {
+      const latest = [...state.sources].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 5);
+      if (state.dashboardAuditError) activity.append(node('p', 'Audit activity is not available for this account. Recent sources are shown instead.', 'mb-2 text-xs text-white/40'));
+      if (!latest.length) activity.append(node('p', activeProject ? 'No source activity yet.' : 'Select a project to view activity.', 'text-sm text-white/45'));
+      latest.forEach((source) => activity.append(node('div', `${statusLabel(source.status)} · ${source.originalName}`, 'border-b border-white/5 pb-2 text-sm text-white/65 last:border-0')));
+    }
   }
   const pendingList = byId('pendingList');
   if (pendingList) {
     clear(pendingList);
     const items = state.findings.filter((finding) => finding.status === 'pending').slice(0, 3);
     if (!items.length) pendingList.append(node('p', activeProject ? 'No findings need review.' : 'Select a project to see pending findings.', 'text-sm text-white/45 text-center py-4'));
-    items.forEach((finding) => pendingList.append(node('p', finding.title, 'text-sm text-white/75 bg-white/[0.04] border border-white/10 rounded-xl p-3')));
+    items.forEach((finding) => {
+      const item = node('button', undefined, 'w-full rounded-xl border border-white/10 bg-white/[0.04] p-3 text-left hover:bg-white/[0.08]');
+      item.type = 'button'; item.setAttribute('aria-label', `Review ${finding.title}`);
+      item.append(node('span', finding.category || 'Finding', 'block text-[10px] font-semibold uppercase tracking-wider text-violet-300'), node('span', finding.title, 'mt-1 block text-sm font-medium text-white/80'));
+      item.addEventListener('click', () => navigate('review'));
+      pendingList.append(item);
+    });
+  }
+  const recentHandovers = byId('dashboardRecentHandovers');
+  if (recentHandovers) {
+    clear(recentHandovers);
+    if (!activeProject) recentHandovers.append(node('p', 'Select a project to view saved handover versions.', 'text-sm text-white/45'));
+    else if (state.handoverError) recentHandovers.append(node('p', `Handovers unavailable: ${state.handoverError}`, 'text-sm text-rose-200'));
+    else if (!state.handovers.length) recentHandovers.append(node('p', 'No handover versions saved yet.', 'text-sm text-white/45'));
+    else state.handovers.slice(0, 3).forEach((handover) => {
+      const status = handover.effectiveStatus || handover.approvalStatus || 'draft';
+      const row = node('button', undefined, 'w-full rounded-xl border border-white/5 bg-white/[0.04] p-3 text-left hover:bg-white/[0.08]');
+      row.type = 'button'; row.append(node('span', `Version ${handover.version}`, 'text-sm font-semibold text-white'), node('span', status, 'float-right rounded-full bg-indigo-50 px-2 py-1 text-[10px] font-medium text-indigo-700'), node('span', handover.createdAt ? new Date(handover.createdAt).toLocaleDateString() : 'Saved handover', 'mt-1 block text-xs text-white/45'));
+      row.addEventListener('click', () => navigate('handover')); recentHandovers.append(row);
+    });
   }
   const projectTabSources = document.querySelector('[data-ptab="sources"]');
   const projectTabFindings = document.querySelector('[data-ptab="findings"]');
@@ -1199,14 +2096,27 @@ function renderDashboard() {
     const count = status === 'all' ? state.findings.length : state.findings.filter((finding) => finding.status === status).length;
     button.textContent = `${status === 'all' ? 'All' : statusLabel(status)} (${state.errors.findings ? '—' : count})`;
   });
-  const navCounts = { dashboard: pending, projects: state.errors.projects ? '—' : state.projects.length, sources: state.errors.sources ? '—' : state.sources.length, findings: state.errors.findings ? '—' : state.findings.length, review: state.errors.findings ? '—' : pending };
+  const navCounts = { dashboard: pending, projects: state.errors.projects ? '—' : activeProjects, sources: state.errors.sources ? '—' : state.sources.length, findings: state.errors.findings ? '—' : state.findings.length, review: state.errors.findings ? '—' : pending };
   Object.entries(navCounts).forEach(([view, value]) => {
-    const badge = document.querySelector(`[data-nav="${view}"] span`);
-    if (badge) badge.textContent = String(value);
+    const badge = document.querySelector(`[data-nav="${view}"] .nav-count`);
+    if (badge) { badge.textContent = value ? String(value) : ''; badge.classList.toggle('hidden', !value); }
   });
 }
 
 function navigate(view) {
+  if (!['sources', 'projects'].includes(view)) stopGitHubPolling();
+  const pageCopy = {
+    dashboard: ['Dashboard', 'Your project intelligence at a glance.'],
+    projects: ['Projects', 'Workspaces, source context, and handover progress.'],
+    sources: ['Sources', 'Connect documents and GitHub evidence to your project.'],
+    findings: ['AI findings', 'Evidence-backed suggestions for human review.'],
+    review: ['Review & approval', 'Make and trace decisions against source evidence.'],
+    handover: ['Handover reports', 'Versioned project knowledge, ready to share.'],
+    settings: ['Settings', 'Account, permissions, and project recovery.'],
+  }[view] || ['RELAY', 'Project knowledge workspace.'];
+  if (byId('topbarTitle')) byId('topbarTitle').textContent = pageCopy[0];
+  if (byId('topbarBreadcrumb')) byId('topbarBreadcrumb').textContent = `Workspace / ${pageCopy[0]}`;
+  if (byId('topbarDescription')) byId('topbarDescription').textContent = pageCopy[1];
   document.querySelectorAll('[id^="view-"]').forEach((section) => section.classList.add('hidden'));
   byId(`view-${view}`)?.classList.remove('hidden');
   if (view === 'projects') byId('projectDetail')?.classList.toggle('hidden', !state.selectedProjectId);
@@ -1214,14 +2124,18 @@ function navigate(view) {
     const active = button.dataset.nav === view;
     button.classList.toggle('bg-white', active); button.classList.toggle('text-[#060A16]', active);
     button.classList.toggle('text-white/70', !active);
+    if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
   });
   byId('sidebar').classList.add('-translate-x-full');
+  byId('sidebarBackdrop')?.classList.add('hidden');
+  byId('mobileNavToggle')?.setAttribute('aria-expanded', 'false');
   if (view === 'projects') renderProjects();
   if (view === 'sources') renderSources();
+  if (view === 'sources') resumeGitHubPolling();
   if (view === 'findings') renderFindings();
   if (view === 'review') renderReview();
   if (view === 'handover') { renderHandover(); loadHandovers(); }
-  if (view === 'settings') { byId('settingsNameInput').value = state.user?.name || 'Campus Connect Demo'; byId('settingsEmailInput').value = state.user?.email || ''; }
+  if (view === 'settings') { byId('settingsNameInput').value = state.user?.name || 'Campus Connect Demo'; byId('settingsEmailInput').value = state.user?.email || ''; loadProjectDeletion(); }
   window.scrollTo(0, 0);
 }
 
@@ -1240,10 +2154,11 @@ async function loadEvidenceSource(sourceId, evidence) {
   panel.classList.remove('hidden');
   byId('sourceViewerText').textContent = '';
   try {
-    const data = await api(`/sources/${encodeURIComponent(sourceId)}/content`);
+    const revisionQuery = evidence?.sourceRevision ? `?revisionId=${encodeURIComponent(evidence.sourceRevision)}` : '';
+    const data = await api(`/sources/${encodeURIComponent(sourceId)}/content${revisionQuery}`);
     if (requestId !== evidenceRequest) return;
     const text = data.source?.extractedText || '';
-    byId('sourceViewerName').textContent = data.source?.originalName || 'Source';
+    byId('sourceViewerName').textContent = `${data.source?.originalName || 'Source'}${data.source?.revisionKey ? ` · revision ${data.source.revisionKey}` : ''}`;
     const viewer = byId('sourceViewerText');
     const start = evidence?.verificationStatus === 'verified' ? evidence.startOffset : -1;
     const end = evidence?.verificationStatus === 'verified' ? evidence.endOffset : -1;
@@ -1258,24 +2173,33 @@ async function loadEvidenceSource(sourceId, evidence) {
     status.textContent = `Could not load source text: ${error.message}`;
   }
 }
-async function downloadEvidenceSource(sourceId) {
+async function downloadEvidenceSource(sourceId, evidence) {
   if (!sourceId || state.mode === 'demo') { toast('Original file download is unavailable for demo data.', 'error'); return; }
   const status = byId('sourceViewStatus');
   status.textContent = 'Preparing original file…';
   try {
     const headers = new Headers();
     if (state.token) headers.set('Authorization', `Bearer ${state.token}`);
-    const response = await fetch(`${API_URL}/sources/${encodeURIComponent(sourceId)}/download`, { headers });
+    const revisionQuery = evidence?.sourceRevision ? `?revisionId=${encodeURIComponent(evidence.sourceRevision)}` : '';
+    const endpoint = evidence?.sourceRevision
+      ? `/sources/${encodeURIComponent(sourceId)}/content${revisionQuery}`
+      : `/sources/${encodeURIComponent(sourceId)}/download`;
+    const response = await fetch(`${API_URL}${endpoint}`, { headers });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       throw new Error(data.message || `Download failed (${response.status})`);
     }
-    const blobUrl = URL.createObjectURL(await response.blob());
+    let blob = await response.blob();
+    if (evidence?.sourceRevision) {
+      const data = JSON.parse(await blob.text());
+      blob = new Blob([data.source?.extractedText || ''], { type: data.source?.mimeType || 'text/plain' });
+    }
+    const blobUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = blobUrl;
     link.download = byId('evSourceMeta').textContent || 'source';
     document.body.append(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-    status.textContent = 'Original file downloaded.';
+    status.textContent = evidence?.sourceRevision ? 'Evidence source revision downloaded.' : 'Original file downloaded.';
   } catch (error) { status.textContent = `Could not download source: ${error.message}`; }
 }
 function openEvidence(findingId) {
@@ -1302,7 +2226,7 @@ function openEvidence(findingId) {
   byId('openSourceButton').disabled = !evidenceSourceId || state.mode === 'demo';
   byId('downloadSourceButton').disabled = !evidenceSourceId || state.mode === 'demo';
   byId('openSourceButton').onclick = () => loadEvidenceSource(evidenceSourceId, evidence);
-  byId('downloadSourceButton').onclick = () => downloadEvidenceSource(evidenceSourceId);
+  byId('downloadSourceButton').onclick = () => downloadEvidenceSource(evidenceSourceId, evidence);
   byId('evidenceModal').classList.remove('hidden');
 }
 function closeEvidence() { evidenceRequest += 1; byId('evidenceModal')?.classList.add('hidden'); }
@@ -1311,6 +2235,7 @@ function renderHandover() {
   const history = byId('versionHistory');
   if (!preview || !history) return;
   clear(preview); clear(history);
+  renderHandoverSignoff(null);
   const versionSelect = byId('handoverVersionSelect');
   if (versionSelect) {
     clear(versionSelect);
@@ -1346,6 +2271,7 @@ function renderHandover() {
               : 'Only approved findings are included in each generated snapshot.';
 
   if (state.mode === 'demo') {
+    renderHandoverSignoff(null);
     setStatus(history, 'DEMO DATA · Sample workspace has no generated handover versions.', 'info');
     setStatus(preview, 'No live report exists in demo mode. Sign in and select a real project to generate a report from approved findings.', 'info');
     return;
@@ -1356,9 +2282,10 @@ function renderHandover() {
   if (!state.handovers.length) { setStatus(history, 'No handover versions yet. Generate one after approving findings.'); setStatus(preview, 'No report has been generated for this project.'); return; }
   const handover = state.handovers.find((item) => item._id === state.selectedHandoverId) || state.handovers[0];
   state.selectedHandoverId = handover._id;
+  renderHandoverSignoff(handover);
   if (versionSelect) versionSelect.value = handover._id;
   const report = handover.reportContent || {};
-  const article = node('article', undefined, 'rounded-xl bg-white p-5 md:p-8 text-[#0A0F1E]');
+  const article = node('article', undefined, 'handover-document rounded-xl bg-white p-5 md:p-8 text-[#0A0F1E]');
   article.append(node('p', `RELAY · HANDOVER VERSION ${handover.version}`, 'font-mono text-xs font-bold tracking-widest text-violet-700'));
   article.append(node('h2', report.project?.name || 'Project handover', 'mt-3 font-serif text-2xl'));
   article.append(node('p', `Generated ${report.generatedAt ? new Date(report.generatedAt).toLocaleString() : 'date unavailable'} by ${report.generatedBy?.name || handover.createdBy?.name || 'RELAY user'} · ${report.approvedFindingCount || 0} approved finding(s)`, 'mt-1 text-xs text-black/50'));
@@ -1387,12 +2314,69 @@ function renderHandover() {
   state.handovers.forEach((item) => {
     const button = node('button', undefined, `w-full text-left rounded-xl border px-3 py-3 text-sm transition ${item._id === handover._id ? 'border-violet-400/50 bg-violet-500/15 text-white' : 'border-white/10 bg-white/[0.04] text-white/75 hover:bg-white/[0.08]'}`);
     button.type = 'button';
+    button.setAttribute('aria-current', String(item._id === handover._id));
     button.append(node('span', `Version ${item.version}`, 'block font-medium'));
-    button.append(node('span', `${new Date(item.createdAt).toLocaleDateString()} · ${item.reportContent?.approvedFindingCount || 0} approved findings`, 'block mt-1 text-xs text-white/45'));
+    const approvalLabel = item.effectiveStatus || item.approvalStatus || 'draft';
+    button.append(node('span', `${new Date(item.createdAt).toLocaleDateString()} · ${item.reportContent?.approvedFindingCount || 0} approved findings · ${approvalLabel}`, 'block mt-1 text-xs text-white/45'));
     button.addEventListener('click', () => selectHandoverVersion(item._id));
     history.append(button);
   });
 }
+
+function canSignHandover(handover) {
+  return canSignHandoverForUser({ mode: state.mode, project: currentProject(), userId: state.user?.id, assignments: state.assignments, handover });
+}
+
+function renderHandoverSignoff(handover) {
+  const panel = byId('handoverSignoffPanel');
+  if (!panel) return;
+  clear(panel);
+  if (state.mode === 'demo') { panel.append(node('p', 'DEMO DATA · Sign-off is available in authenticated projects.', 'text-xs text-violet-200/70')); return; }
+  if (!state.selectedProjectId) { panel.append(node('p', 'Select a project to view sign-off.', 'text-xs text-white/45')); return; }
+  if (!handover) { panel.append(node('p', 'Select a handover version to view its decision and sign-off history.', 'text-xs text-white/45')); return; }
+  const status = handover.effectiveStatus || handover.approvalStatus || 'draft';
+  const signoffState = state.handoverSignoffs[handover._id];
+  panel.append(node('p', `Version ${handover.version} · ${status}`, `text-sm font-semibold ${status === 'approved' ? 'text-emerald-200' : status === 'rejected' ? 'text-rose-200' : status === 'superseded' ? 'text-white/45' : 'text-amber-200'}`));
+  if (state.handoverSignoffError) panel.append(node('p', `Could not load sign-off history: ${state.handoverSignoffError}`, 'text-xs text-rose-200'));
+  if (signoffState?.loading) panel.append(node('p', 'Loading decision history…', 'text-xs text-white/45'));
+  else if (signoffState?.error) panel.append(node('p', `Could not load decision history: ${signoffState.error}`, 'text-xs text-rose-200'));
+  else if (!signoffState?.signoffs?.length) panel.append(node('p', 'No sign-off decision recorded for this version.', 'text-xs text-white/45'));
+  else signoffState.signoffs.forEach((entry) => {
+    panel.append(node('p', `${entry.decision === 'approved' ? 'Approved' : 'Rejected'} by ${entry.signer?.name || entry.signer?.email || 'Approver'} · ${new Date(entry.createdAt).toLocaleString()}`, 'text-xs text-white/65'));
+    if (entry.reason) panel.append(node('p', `Reason: ${entry.reason}`, 'text-xs text-rose-200 whitespace-pre-wrap'));
+    if (entry.comment) panel.append(node('p', `Comment: ${entry.comment}`, 'text-xs text-white/45 whitespace-pre-wrap'));
+  });
+  if (status === 'superseded') panel.append(node('p', 'This version is superseded and cannot receive a new approval.', 'text-xs text-amber-200/80'));
+  else if (handover.approvalStatus === 'pending' && String(handover.createdBy?._id || handover.createdBy) === String(state.user?.id)) panel.append(node('p', 'You created this version and cannot approve it.', 'text-xs text-white/45'));
+  else if (handover.approvalStatus === 'pending' && canSignHandover(handover)) {
+    const controls = node('div', undefined, 'flex flex-wrap gap-2');
+    const approve = reviewButton(state.handoverSignoffBusyId === handover._id ? 'Saving…' : 'Approve version', 'bg-emerald-500/20 text-emerald-100 hover:bg-emerald-500/30', () => submitHandoverSignoff(handover, 'approved'));
+    const reject = reviewButton('Reject version', 'bg-rose-500/20 text-rose-100 hover:bg-rose-500/30', () => submitHandoverSignoff(handover, 'rejected'));
+    approve.disabled = reject.disabled = Boolean(state.handoverSignoffBusyId);
+    controls.append(approve, reject); panel.append(controls);
+  } else if (handover.approvalStatus === 'pending') panel.append(node('p', 'Read only · an active approver assignment for this version is required.', 'text-xs text-white/45'));
+}
+
+async function submitHandoverSignoff(handover, decision) {
+  if (!canSignHandover(handover)) return;
+  const fields = decision === 'rejected'
+    ? [{ label: 'Reason for rejection', required: true, maxLength: 2000 }, { label: 'Sign-off comment', required: true, maxLength: 5000 }]
+    : [{ label: 'Approval comment', required: true, maxLength: 5000 }];
+  const values = await accessibleFormDialog({ title: decision === 'approved' ? `Approve handover Version ${handover.version}` : `Reject handover Version ${handover.version}`, description: 'This decision is permanently recorded against this exact handover version.', fields, submitLabel: decision === 'approved' ? 'Approve version' : 'Reject version', danger: decision === 'rejected' });
+  if (!values) return;
+  const reason = decision === 'rejected' ? values[0] : undefined;
+  const comment = decision === 'rejected' ? values[1] : values[0];
+  const validated = validateSignoffInput({ decision, comment, reason });
+  if (!validated.valid) { toast(decision === 'rejected' ? 'A sign-off comment and rejection reason are required.' : 'An approval comment is required.', 'error'); return; }
+  state.handoverSignoffBusyId = handover._id; renderHandoverSignoff(handover);
+  try {
+    await api(`/handovers/${encodeURIComponent(handover._id)}/signoffs`, { method: 'POST', body: JSON.stringify({ decision, comment: validated.comment, ...(validated.reason ? { reason: validated.reason } : {}) }) });
+    toast(decision === 'approved' ? `Handover Version ${handover.version} approved.` : `Handover Version ${handover.version} rejected.`);
+    await loadHandovers();
+  } catch (error) { state.handoverSignoffError = error.message; toast(`Could not save handover sign-off: ${error.message}`, 'error'); }
+  finally { state.handoverSignoffBusyId = ''; renderHandover(); }
+}
+
 async function loadHandovers() {
   if (state.mode === 'demo' || !state.selectedProjectId) { state.handovers = []; state.selectedHandoverId = ''; renderHandover(); return; }
   const requestId = ++handoverRequest;
@@ -1402,6 +2386,15 @@ async function loadHandovers() {
     const result = await api(`/projects/${encodeURIComponent(projectId)}/handovers`);
     if (requestId !== handoverRequest || projectId !== state.selectedProjectId) return;
     state.handovers = result.handovers || [];
+    state.handoverSignoffs = {};
+    const signoffResults = await Promise.allSettled(state.handovers.map((handover) => api(`/handovers/${encodeURIComponent(handover._id)}/signoffs`)));
+    if (requestId !== handoverRequest || projectId !== state.selectedProjectId) return;
+    for (const [index, response] of signoffResults.entries()) {
+      const handoverId = state.handovers[index]._id;
+      state.handoverSignoffs[handoverId] = response.status === 'fulfilled'
+        ? { signoffs: response.value.signoffs || [] }
+        : { error: response.reason.message, signoffs: [] };
+    }
     if (!state.handovers.some((item) => item._id === state.selectedHandoverId)) state.selectedHandoverId = state.handovers[0]?._id || '';
   } catch (error) {
     if (requestId !== handoverRequest || projectId !== state.selectedProjectId) return;
@@ -1411,6 +2404,98 @@ async function loadHandovers() {
   }
 }
 function selectHandoverVersion(handoverId) { state.selectedHandoverId = handoverId; renderHandover(); }
+
+async function loadProjectDeletion() {
+  const panel = byId('projectDeletionPanel');
+  if (!panel) return;
+  clear(panel);
+  const project = currentProject();
+  if (state.mode === 'demo') { setStatus(panel, 'DEMO DATA · Project deletion is disabled in the sample workspace.'); return; }
+  if (!project) { setStatus(panel, 'Select a project to view its deletion settings.'); return; }
+  if (!isCurrentProjectOwner(project, state.user?.id)) { setStatus(panel, 'Only the project owner can view deletion and recovery status.'); return; }
+  state.projectDeletionLoading = true;
+  setStatus(panel, 'Loading project retention status…', 'loading');
+  try {
+    const result = await api(`/projects/${encodeURIComponent(project._id)}/deletion`);
+    if (project._id !== state.selectedProjectId) return;
+    state.projectDeletion = result.deletion;
+    state.projectDeletionError = '';
+  } catch (error) { state.projectDeletionError = error.message; state.projectDeletion = null; }
+  finally { state.projectDeletionLoading = false; renderProjectDeletion(); }
+}
+
+function renderProjectDeletion() {
+  const panel = byId('projectDeletionPanel');
+  if (!panel) return;
+  clear(panel);
+  const project = currentProject();
+  if (!project || !isCurrentProjectOwner(project, state.user?.id) || state.mode !== 'real') { setStatus(panel, 'Project deletion controls are available to the owner of a saved project.'); return; }
+  if (state.projectDeletionLoading) { setStatus(panel, 'Loading project retention status…', 'loading'); return; }
+  if (state.projectDeletionError) { setStatus(panel, `Could not load deletion status: ${state.projectDeletionError}`, 'error'); }
+  const deletion = state.projectDeletion;
+  const projectState = deletion?.deletionState || project.deletionState || 'active';
+  if (projectState === 'active') {
+    panel.append(node('p', 'This project is active. Deleting it freezes access now and permanently removes project content after the 30-day recovery window.', 'text-sm text-white/60'));
+    const button = node('button', state.projectDeletionBusy ? 'Requesting…' : 'Delete this project', 'mt-3 rounded-full border border-rose-300/20 bg-rose-500/15 px-4 py-2 text-sm font-semibold text-rose-100 hover:bg-rose-500/25 disabled:opacity-50');
+    button.type = 'button'; button.disabled = state.projectDeletionBusy;
+    button.addEventListener('click', requestProjectDeletionUI); panel.append(button); return;
+  }
+  const status = projectState === 'queued' ? 'Recovery window' : projectState === 'purging' ? 'Cleanup in progress' : projectState === 'blocked' ? 'Cleanup needs attention' : 'Deletion complete';
+  panel.append(node('p', `${status} · ${projectState}`, 'text-sm font-semibold text-amber-200'));
+  if (deletion?.deletionRequestedAt) panel.append(node('p', `Requested ${new Date(deletion.deletionRequestedAt).toLocaleString()}`, 'mt-1 text-xs text-white/50'));
+  if (deletion?.recoveryEndsAt) panel.append(node('p', `Recovery deadline ${new Date(deletion.recoveryEndsAt).toLocaleString()}`, 'mt-1 text-xs text-white/50'));
+  const job = deletion?.job;
+  if (job) {
+    const stage = String(job.phase || 'cleanup').replaceAll('_', ' ');
+    panel.append(node('p', `Cleanup ${job.status || 'queued'} · ${stage}${Number.isFinite(job.attemptCount) ? ` · attempt ${job.attemptCount}` : ''}`, 'mt-2 text-xs text-white/60'));
+    if (job.status === 'retry_wait' && job.nextAttemptAt) panel.append(node('p', `Next retry after ${new Date(job.nextAttemptAt).toLocaleString()}.`, 'mt-1 text-xs text-amber-100/70'));
+    if (job.lastErrorCode) panel.append(node('p', safeDeletionError(job.lastErrorCode), 'mt-1 text-xs text-rose-200/80'));
+  }
+  const recoverable = isDeletionRecoverable({ ...deletion, deletionState: projectState, job });
+  if (recoverable) {
+    const button = node('button', state.projectDeletionBusy ? 'Recovering…' : 'Recover project', 'mt-3 rounded-full bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-50');
+    button.type = 'button'; button.disabled = state.projectDeletionBusy; button.addEventListener('click', recoverProjectDeletionUI); panel.append(button);
+  } else if (projectState !== 'complete') panel.append(node('p', 'Recovery is unavailable after cleanup begins. Contact the project owner if this status looks unexpected.', 'mt-3 text-xs text-white/40'));
+}
+
+function safeDeletionError(code) {
+  return deletionErrorMessage(code);
+}
+
+async function requestProjectDeletionUI() {
+  const project = currentProject();
+  if (!isCurrentProjectOwner(project, state.user?.id) || state.projectDeletionBusy) return;
+  if (!await confirmInApp(`Request deletion of “${project.name}”? Access will stop immediately. Recovery is available for 30 days before cleanup.`, 'Delete project', true)) return;
+  state.projectDeletionBusy = true; renderProjectDeletion();
+  try {
+    const result = await api(`/projects/${encodeURIComponent(project._id)}`, { method: 'DELETE' });
+    project.deletionState = result.deletion?.state || 'queued';
+    project.deletionRequestedAt = result.deletion?.requestedAt || new Date().toISOString();
+    state.projectDeletion = { ...(state.projectDeletion || {}), ...result.deletion, deletionState: project.deletionState, deletionRequestedAt: result.deletion?.requestedAt, job: { status: 'queued', phase: 'source_files', attemptCount: 0 } };
+    state.projectDeletionError = '';
+    renderProjects();
+    toast('Project deletion requested. The recovery window has started.');
+  } catch (error) { state.projectDeletionError = error.message; toast(`Could not request project deletion: ${error.message}`, 'error'); }
+  finally { state.projectDeletionBusy = false; renderProjectDeletion(); }
+}
+
+async function recoverProjectDeletionUI() {
+  const project = currentProject();
+  if (!isCurrentProjectOwner(project, state.user?.id) || state.projectDeletionBusy) return;
+  if (!await confirmInApp(`Recover “${project.name}” and restore project access?`, 'Recover project')) return;
+  state.projectDeletionBusy = true; renderProjectDeletion();
+  try {
+    await api(`/projects/${encodeURIComponent(project._id)}/deletion/cancel`, { method: 'POST', body: '{}' });
+    project.deletionState = 'active';
+    project.deletionRequestedAt = undefined;
+    state.projectDeletion = { deletionState: 'active' };
+    state.projectDeletionError = '';
+    renderProjects();
+    toast('Project recovered. Access has been restored.');
+  } catch (error) { state.projectDeletionError = error.message; toast(`Could not recover project: ${error.message}`, 'error'); }
+  finally { state.projectDeletionBusy = false; renderProjectDeletion(); }
+}
+
 async function generateReport() {
   if (state.mode === 'demo' || !state.selectedProjectId || state.handoverBusy) return;
   state.handoverBusy = true; state.handoverError = ''; state.handoverActionError = ''; renderHandover();
@@ -1466,15 +2551,45 @@ function switchProjectTab(tab) {
     const active = button.dataset.ptab === tab;
     button.classList.toggle('bg-white', active); button.classList.toggle('text-[#060A16]', active);
     button.classList.toggle('text-white/60', !active);
+    button.setAttribute('aria-selected', String(active));
   });
   const content = byId('projectTabContent');
   clear(content);
   const project = state.projects.find((item) => item._id === state.selectedProjectId);
   if (tab === 'overview') {
-    content?.append(node('p', project?.description || 'Select a project to view its overview.', 'text-sm text-white/60'));
-    content?.append(node('p', `${state.sources.length} source(s) · ${state.findings.length} finding(s)`, 'mt-3 text-xs text-white/40'));
+    if (!project) { setStatus(content, 'Select a project to view its overview.'); return; }
+    const overview = node('div', undefined, 'space-y-5');
+    const summary = node('div', undefined, 'rounded-2xl border border-white/10 bg-white/[0.04] p-5');
+    summary.append(node('p', project.description || 'No project description has been added.', 'text-sm leading-6 text-white/65'));
+    const stats = node('div', undefined, 'grid grid-cols-2 gap-3 lg:grid-cols-4');
+    [
+      ['Sources', state.errors.sources ? 'Unavailable' : state.sources.length],
+      ['Processed', state.errors.sources ? 'Unavailable' : state.sources.filter((source) => source.status === 'processed').length],
+      ['Findings', state.errors.findings ? 'Unavailable' : state.findings.length],
+      ['Pending review', state.errors.findings ? 'Unavailable' : state.findings.filter((finding) => finding.status === 'pending').length],
+    ].forEach(([label, value]) => {
+      const tile = node('div', undefined, 'rounded-xl border border-white/10 bg-white/[0.04] p-4');
+      tile.append(node('p', label, 'text-xs text-white/45'), node('p', String(value), 'mt-2 text-2xl font-semibold text-white'));
+      stats.append(tile);
+    });
+    const actions = node('div', undefined, 'flex flex-wrap gap-2');
+    [['Sources', 'sources'], ['Findings', 'findings'], ['Review queue', 'review'], ['Handovers', 'handover']].forEach(([label, destination]) => {
+      const action = reviewButton(label, 'bg-white/10 px-4 py-2 text-sm text-white hover:bg-white/15', () => navigate(destination));
+      actions.append(action);
+    });
+    overview.append(summary, stats, actions); content.append(overview);
   } else if (tab === 'team') renderTeam();
   else if (tab === 'sources' || tab === 'findings') navigate(tab);
+  else if (tab === 'contradictions') {
+    const section = node('section', undefined, 'space-y-4');
+    const header = node('div', undefined, 'flex flex-wrap items-center justify-between gap-3');
+    header.append(node('div', undefined, ''));
+    header.firstChild.append(node('h4', 'Cross-source contradictions', 'text-base font-semibold text-white'), node('p', 'Candidates remain suspected until an authorized human confirms them.', 'mt-1 text-xs text-white/45'));
+    const detect = reviewButton('Check approved findings', 'rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500', detectContradictions);
+    detect.id = 'projectDetectContradictionsButton'; header.append(detect);
+    const list = node('div', undefined, 'space-y-3'); list.id = 'projectContradictionList'; list.setAttribute('aria-live', 'polite');
+    section.append(header, list); content.append(section); renderContradictions();
+  }
   else if (tab === 'handover') navigate('handover');
 }
 
@@ -1500,8 +2615,13 @@ async function renderTeam() {
   section.append(heading);
   content.append(section);
   try {
-    const data = await api(`/projects/${projectId}/members`);
+    const [data, assignmentData] = await Promise.all([
+      api(`/projects/${projectId}/members`),
+      api(`/projects/${projectId}/assignments`),
+    ]);
     if (state.selectedProjectId !== decodeURIComponent(projectId)) return;
+    state.assignments = assignmentData.assignments || [];
+    state.assignmentError = '';
     clear(section);
     const top = node('div', undefined, 'flex flex-wrap items-center justify-between gap-3');
     const title = node('div', undefined, '');
@@ -1536,6 +2656,7 @@ async function renderTeam() {
       memberList.append(row);
     });
     section.append(memberList);
+    renderAssignmentPanel(section, projectId, members, assignmentData);
     if (data.canManageMembers) {
       if (members.filter((member) => member.role !== 'owner').length === 0) section.append(node('p', 'No collaborators yet. Add a registered RELAY user to share this project.', 'text-xs text-white/45'));
       const form = document.createElement('form');
@@ -1567,8 +2688,132 @@ async function renderTeam() {
   }
 }
 
+function renderAssignmentPanel(section, projectId, members, assignmentData) {
+  const panel = node('section', undefined, 'rounded-2xl border border-violet-300/10 bg-[#0B122A] p-4 space-y-4');
+  const title = node('div', undefined, '');
+  title.append(
+    node('h4', 'Reviewer and approver assignments', 'text-white font-semibold'),
+    node('p', 'Assignments add a specific workflow permission. They never grant project editing or source upload.', 'mt-1 text-xs text-white/45'),
+  );
+  panel.append(title);
+  const assignments = assignmentData.assignments || [];
+  const activeReviewers = assignments.filter((item) => item.role === 'reviewer' && item.status === 'active');
+  if (!activeReviewers.length && currentProject()?.workflowPolicy?.reviewMode === 'assigned') {
+    panel.append(node('p', 'No active reviewers are assigned. Findings remain read-only until the owner assigns reviewers.', 'rounded-xl bg-amber-400/10 p-3 text-xs text-amber-100'));
+  }
+  if (!assignments.length) panel.append(node('p', 'No workflow assignments yet.', 'text-xs text-white/45'));
+  const list = node('div', undefined, 'space-y-2');
+  assignments.forEach((assignment) => {
+    const row = node('div', undefined, 'flex flex-col sm:flex-row sm:items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3');
+    const identity = assignment.user?.name || assignment.user?.email || 'Project member';
+    const scope = assignment.scopeType === 'category' ? `Category · ${assignment.scopeValue}`
+      : assignment.scopeType === 'handover' ? 'Handover-specific' : 'Entire project';
+    const status = assignment.status === 'active' ? 'ACTIVE' : 'REVOKED';
+    row.append(node('div', `${identity} · ${assignment.role.replace('_', ' ')} · ${scope}`, 'flex-1 text-xs text-white/75'));
+    row.append(node('span', status, `text-[10px] font-mono ${assignment.status === 'active' ? 'text-emerald-200' : 'text-white/40'}`));
+    if (assignmentData.canManageAssignments && assignment.status === 'active') {
+      const revoke = node('button', 'Revoke', 'rounded-full bg-rose-500/15 px-3 py-1.5 text-xs text-rose-200 hover:bg-rose-500/25');
+      revoke.type = 'button';
+      revoke.addEventListener('click', async () => {
+        if (!await confirmInApp(`Revoke ${assignment.role.replace('_', ' ')} access for ${identity}? This will be recorded in the assignment history.`, 'Revoke assignment', true)) return;
+        try {
+          await api(`/projects/${projectId}/assignments/${assignment._id}/revoke`, { method: 'POST', body: JSON.stringify({ reason: 'Revoked by project owner.' }) });
+          await loadProjectData();
+          await renderTeam();
+        } catch (error) { toast(`Could not revoke assignment: ${error.message}`, 'error'); }
+      });
+      row.append(revoke);
+    }
+    list.append(row);
+  });
+  panel.append(list);
+
+  if (assignmentData.canManageAssignments) {
+    const form = document.createElement('form');
+    form.className = 'rounded-xl border border-white/10 bg-black/10 p-3 space-y-3';
+    form.append(node('h5', 'Assign a workflow role', 'text-sm font-semibold text-white'));
+    const controls = node('div', undefined, 'grid gap-2 sm:grid-cols-2');
+    const user = document.createElement('select');
+    user.className = 'bg-[#111B34] border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white';
+    user.setAttribute('aria-label', 'Member to assign');
+    members.forEach((member) => user.add(new Option(`${member.user?.name || member.user?.email || 'Member'} · ${member.role}`, member.memberId)));
+    const role = document.createElement('select');
+    role.className = user.className;
+    role.setAttribute('aria-label', 'Workflow assignment role');
+    [['reviewer', 'Reviewer'], ['approver', 'Approver'], ['audit_reader', 'Audit reader']].forEach(([value, label]) => role.add(new Option(label, value)));
+    const scope = document.createElement('select');
+    scope.className = user.className;
+    scope.setAttribute('aria-label', 'Assignment scope');
+    scope.add(new Option('Entire project', 'project'));
+    scope.add(new Option('One finding category', 'category'));
+    const category = document.createElement('select');
+    category.className = user.className;
+    category.setAttribute('aria-label', 'Finding category scope');
+    categories.slice(1).forEach((value) => category.add(new Option(value, value)));
+    category.classList.add('hidden');
+    scope.addEventListener('change', () => category.classList.toggle('hidden', scope.value !== 'category'));
+    controls.append(user, role, scope, category);
+    const submit = node('button', 'Create assignment', 'rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50');
+    submit.type = 'submit';
+    submit.disabled = !members.length;
+    const message = node('p', '', 'hidden text-xs');
+    form.append(controls, submit, message);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submit.disabled = true; submit.textContent = 'Saving…'; message.className = 'hidden text-xs';
+      const body = { userId: user.value, role: role.value, scopeType: scope.value };
+      if (scope.value === 'category') body.scopeValue = category.value;
+      try {
+        await api(`/projects/${projectId}/assignments`, { method: 'POST', body: JSON.stringify(body) });
+        toast('Workflow assignment created');
+        await loadProjectData();
+        await renderTeam();
+      } catch (error) { message.textContent = error.message; message.className = 'text-xs text-rose-300'; }
+      finally { submit.disabled = !members.length; submit.textContent = 'Create assignment'; }
+    });
+    panel.append(form);
+
+    const project = currentProject();
+    const policy = document.createElement('form');
+    policy.className = 'rounded-xl border border-white/10 p-3 space-y-3';
+    policy.append(node('h5', 'Workflow policy', 'text-sm font-semibold text-white'));
+    const policyControls = node('div', undefined, 'grid gap-2 sm:grid-cols-2');
+    const reviewMode = document.createElement('select'); reviewMode.className = user.className; reviewMode.setAttribute('aria-label', 'Finding review workflow');
+    reviewMode.add(new Option('Legacy: owners and editors', 'legacy_editors'));
+    reviewMode.add(new Option('Assigned reviewers', 'assigned'));
+    reviewMode.value = project?.workflowPolicy?.reviewMode || 'legacy_editors';
+    const signoffMode = document.createElement('select'); signoffMode.className = user.className; signoffMode.setAttribute('aria-label', 'Handover sign-off workflow');
+    signoffMode.add(new Option('Sign-off not enabled', 'none'));
+    signoffMode.add(new Option('Assigned approvers', 'assigned'));
+    signoffMode.value = project?.workflowPolicy?.signoffMode || 'none';
+    policyControls.append(reviewMode, signoffMode);
+    const savePolicy = node('button', 'Save workflow policy', 'rounded-xl bg-white/10 px-4 py-2.5 text-sm font-semibold text-white hover:bg-white/15');
+    savePolicy.type = 'submit';
+    const policyMessage = node('p', 'Existing projects keep legacy review behavior until the owner opts in. Assigned mode requires an active reviewer.', 'text-xs text-white/45');
+    policy.append(policyControls, savePolicy, policyMessage);
+    policy.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      savePolicy.disabled = true; savePolicy.textContent = 'Saving…';
+      try {
+        const result = await api(`/projects/${projectId}/workflow-policy`, {
+          method: 'PATCH', body: JSON.stringify({ reviewMode: reviewMode.value, signoffMode: signoffMode.value }),
+        });
+        if (project) project.workflowPolicy = result.workflowPolicy;
+        toast('Workflow policy updated');
+        await loadProjectData();
+        await renderTeam();
+      } catch (error) { policyMessage.textContent = error.message; policyMessage.className = 'text-xs text-rose-300'; }
+      finally { savePolicy.disabled = false; savePolicy.textContent = 'Save workflow policy'; }
+    });
+    panel.append(policy);
+  } else if (!assignmentData.canManageAssignments) {
+    panel.append(node('p', 'Only the project owner can create, reassign, revoke, or change workflow assignments.', 'text-xs text-white/40'));
+  }
+  section.append(panel);
+}
+
 async function changeMemberRole(memberId, role) {
-  if (!isProjectOwner() || !window.confirm(`Change this project member to ${role}?`)) return;
+  if (!isProjectOwner() || !await confirmInApp(`Change this project member's role to ${role}?`, 'Update project role')) return;
   try {
     await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/members/${encodeURIComponent(memberId)}`, { method: 'PATCH', body: JSON.stringify({ role }) });
     toast('Member role updated'); await renderTeam();
@@ -1576,7 +2821,7 @@ async function changeMemberRole(memberId, role) {
 }
 
 async function removeProjectMember(memberId, label) {
-  if (!isProjectOwner() || !window.confirm(`Remove ${label} from this project? They will lose access immediately.`)) return;
+  if (!isProjectOwner() || !await confirmInApp(`Remove ${label} from this project? Their project access and active assignments will be revoked.`, 'Remove project member', true)) return;
   try {
     await api(`/projects/${encodeURIComponent(state.selectedProjectId)}/members/${encodeURIComponent(memberId)}`, { method: 'DELETE' });
     toast('Member removed from project'); await renderTeam();
@@ -1617,23 +2862,60 @@ function bindEvents() {
   });
 }
 
-async function restoreSession() {
-  if (!state.token) return;
-  const token = state.token;
-  const attempt = ++authGeneration;
+async function restoreSession(token) {
+  if (!token) return null;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, 10_000);
   try {
-    const data = await api('/auth/me');
-    if (attempt !== authGeneration || state.mode !== 'real' || state.token !== token) return;
+    const data = await api('/auth/me', { signal: controller.signal });
+    if (state.mode !== 'real' || state.token !== token) return null;
     state.user = data.user;
-    showApp();
-  } catch { if (attempt === authGeneration && state.mode === 'real') expireSession(); }
+    return data.user;
+  } catch (error) {
+    if (state.mode === 'real' && state.token === token) expireSession();
+    if (timedOut) throw new Error('Saved session verification timed out.');
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
-Object.assign(window, { login, toggleAuthMode, logout, togglePass, toggleSidebar, navigate, openCreateProject, selectProject, handleUpload, simulateAnalyze, setReviewFilter, openEvidence, closeEvidence, closeReviewDialogs, generateReport, downloadPDF, downloadZip, openProject, switchProjectTab, renderProjects, renderFindings, renderSources, enterDemo, exitDemo, searchFindings, renderHandover, selectHandoverVersion });
+async function initializeStartup() {
+  const splash = byId('welcomeSplash');
+  const startedAt = performance.now();
+  const status = byId('startupStatus');
+  const slowStatusTimer = window.setTimeout(() => {
+    if (status) status.textContent = state.token ? 'Verifying your saved session with RELAY…' : 'Preparing secure sign-in…';
+  }, 1400);
+  const route = await resolveInitialRoute({ token: state.token, restoreSession });
+  window.clearTimeout(slowStatusTimer);
+  if (route.screen === 'app') {
+    state.user = route.user;
+    showApp();
+  } else {
+    byId('app').classList.add('hidden');
+    byId('authOverlay').classList.remove('hidden');
+    if (route.error) {
+      byId('authError').textContent = 'Your saved session could not be restored. Sign in again to continue.';
+      byId('authError').classList.remove('hidden');
+    }
+  }
+  const remaining = remainingSplashTime(startedAt);
+  if (remaining) await new Promise((resolve) => window.setTimeout(resolve, remaining));
+  splash?.classList.add('is-leaving');
+  window.setTimeout(() => {
+    if (splash) { splash.hidden = true; splash.setAttribute('aria-busy', 'false'); }
+    if (route.screen === 'login') byId('authEmail')?.focus({ preventScroll: true });
+  }, 520);
+}
+
+Object.assign(window, { login, toggleAuthMode, logout, togglePass, toggleSidebar, toggleDesktopSidebar, navigate, openCreateProject, selectProject, handleUpload, simulateAnalyze, setReviewFilter, openEvidence, closeEvidence, closeReviewDialogs, generateReport, downloadPDF, downloadZip, openProject, switchProjectTab, renderProjects, renderFindings, renderSources, enterDemo, exitDemo, searchFindings, renderHandover, selectHandoverVersion, detectContradictions });
 bindEvents();
+bindAuthMotion();
 try {
   if (window.lucide) window.lucide.createIcons();
 } catch (error) {
   console.error('Lucide icon initialization failed', error);
 }
-restoreSession();
+initializeStartup();

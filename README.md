@@ -7,20 +7,23 @@ RELAY helps teams turn project documents into reviewed, evidence-linked knowledg
 ## How it works
 
 1. A user creates a project and uploads its source documents.
-2. RELAY extracts text and asks Google Gemini to propose findings with source quotations.
+2. RELAY extracts text and asks Cloudflare Workers AI (primary) or Gemini (fallback for supported temporary failures) to propose findings with source quotations.
 3. RELAY checks each quotation against the extracted source text. Exact matches are marked verified; unsupported quotations remain unverified.
 4. Project owners and editors review findings, correct them, approve or reject them, request clarification, or reopen an approved finding for correction.
-5. An owner or editor generates a handover snapshot from currently approved findings. The snapshot is saved as a version and can be previewed or downloaded as a PDF.
+5. An owner or editor generates a handover snapshot from currently approved findings and human-confirmed contradictions. The immutable snapshot is saved as a version. In assigned signoff mode, an assigned approver other than its creator approves or rejects that exact version before it can be treated as signed off.
 
 ## Implemented features
 
 - Account registration, login, logout, and session restoration.
 - Projects with owner, editor, and viewer access; owners can add existing RELAY users by email.
 - Authenticated document upload, text extraction, source viewing, and download.
-- Gemini-assisted finding analysis with retry handling for temporary provider failures. Uploaded sources are retained if analysis fails.
+- Explicit Cloudflare Workers AI primary and Gemini secondary analysis, with revision-pinned GitHub analysis and retry handling for temporary provider failures.
 - Finding evidence verification against original extracted text, including exact matched text and source offsets where verified.
 - Persisted review actions and history, including approval, rejection, clarification, editing, and reopening.
-- Versioned handover snapshots based on approved findings, with report preview and PDF download.
+- GitHub App repository linking and bounded manual README, commit, and issue ingestion with immutable source revision provenance.
+- Human-reviewed cross-source contradiction candidates; only confirmed conflicts enter newly generated handovers.
+- Reviewer/approver assignments, immutable handover version signoff, and project deletion/recovery.
+- Immutable, versioned handover snapshots containing approved findings and confirmed contradiction summaries, with preview, PDF download, and exact-version approval/rejection history. New assigned-workflow projects require one assigned approver decision per version; rejections require a reason, creators cannot approve their own version, and decisions never carry forward to a newer version.
 - A clearly labeled Campus Connect sample workspace for exploring the interface.
 
 ## Technology and architecture
@@ -30,16 +33,16 @@ RELAY helps teams turn project documents into reviewed, evidence-linked knowledg
 | Frontend | HTML, vanilla JavaScript, CSS, and Vite |
 | Backend | Node.js and Express |
 | Database | MongoDB through Mongoose |
-| AI | Google Gemini through `@google/genai` |
+| AI | Cloudflare Workers AI primary; Google Gemini secondary through `@google/genai` |
 | PDF | PDFKit |
 
-The browser application calls the Express API under `/api`. During local development, Vite proxies `/api` to `http://127.0.0.1:5000`. The API verifies bearer-token authentication and project membership before serving project data or accepting edits. Uploaded files are stored on the server filesystem; extracted text and project workflow records are stored in MongoDB.
+The browser application calls the Express API under `/api`. During local development, Vite proxies `/api` to `http://127.0.0.1:5001`; the backend defaults to port `5001` and honors an explicit `PORT`. The API verifies bearer-token authentication and project membership before serving project data or accepting edits. Uploaded originals use the configured private storage backend; extracted text and project workflow records are stored in MongoDB.
 
 ## Prerequisites
 
 - Node.js and npm installed. The repository does not declare or enforce a Node.js version requirement.
 - A MongoDB local instance or MongoDB Atlas database and a connection URI.
-- A Google Gemini API key for document analysis.
+- Cloudflare Workers AI credentials and a Gemini API key for fallback analysis.
 
 There is no root `package.json`; install and run the client and server separately.
 
@@ -58,7 +61,7 @@ Set the following variables in `server/.env` using your own local values. Keep r
 
 | Variable | Purpose |
 | --- | --- |
-| `PORT` | Express listen port (the local setup uses `5000`). |
+| `PORT` | Express listen port (defaults to `5001`). |
 | `NODE_ENV` | Runtime environment. |
 | `CLIENT_URL` | Allowed frontend origin; local Vite uses `http://localhost:5173`. Multiple allowed origins may be comma-separated. |
 | `MONGODB_URI` | MongoDB connection string. |
@@ -75,7 +78,7 @@ npm install
 npm run dev
 ```
 
-The API listens on port `5000` by default. Check `http://localhost:5000/api/health` for its health response.
+The API listens on port `5001` by default. Check `http://localhost:5001/api/health` for its health response.
 
 ### 2. Start the frontend
 
@@ -133,7 +136,7 @@ Previous review history is retained. Reopening or editing does not change previo
 
 ## Handover reports
 
-An owner or editor can generate a report snapshot from findings approved at that time. Each generation is saved as a version, with a preview and authenticated PDF download. A snapshot is historical content: later finding edits or review actions do not rewrite it. RELAY does **not** currently implement a separate report approval or publication workflow.
+An owner or editor can generate a report snapshot from findings approved at that time and confirmed contradiction candidates. Each generation is saved as an immutable version with preview and authenticated PDF download. In assigned signoff mode, the version starts pending and requires one decision from an assigned approver other than its creator; a rejection requires a reason. A pending older version is computed as superseded after a newer version is generated and cannot receive a new decision. Legacy projects with signoff disabled retain draft handovers.
 
 ## Demo workspace
 
@@ -158,7 +161,7 @@ npm run build --prefix client
 - Uploaded files use local disk storage. A deployment with ephemeral or multiple server instances needs durable private file storage and appropriate retention/access controls.
 - Gemini availability, quotas, latency, and supported model identifiers depend on the configured provider account. Temporary provider failures can interrupt analysis; they do not mean the source upload failed.
 - The demo workspace is illustrative and does not demonstrate persisted AI analysis.
-- Settings features such as profile editing, password recovery, notifications, project archive export, and report approval are not implemented.
+- Settings features such as profile editing, password recovery, notifications, project archive export, and a general audit timeline are not implemented. Version-specific handover signoff and project deletion/recovery are implemented.
 - The UI loads some styling, icon, and font assets from external CDNs; those assets require network access.
 - This is a hackathon MVP, not a production-hardened service. Review deployment security, backups, logging, storage, and operational monitoring before production use.
 
@@ -167,6 +170,7 @@ npm run build --prefix client
 - [Architecture](docs/ARCHITECTURE.md)
 - [API Reference](docs/API_REFERENCE.md)
 - [Vercel Deployment](VERCEL_DEPLOYMENT.md)
+- [Production Database Migration Runbook](docs/DATABASE_MIGRATION_RUNBOOK.md)
 - [Hackathon Demo Guide](docs/DEMO_GUIDE.md)
 - [Known Limitations](docs/KNOWN_LIMITATIONS.md)
 - [Backend Setup](BACKEND_SETUP.md)

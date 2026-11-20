@@ -5,7 +5,8 @@ import { connectDatabase } from '../src/config/database.js';
 function fakeClient(connect) {
   return {
     connection: { readyState: 0 },
-    set() {},
+    settings: {},
+    set(key, value) { this.settings[key] = value; },
     connect,
   };
 }
@@ -17,6 +18,12 @@ test('reuses an already connected Mongoose connection', async () => {
   const result = await connectDatabase({ client, uri: 'mongodb://placeholder', logger: {} });
   assert.equal(result, client.connection);
   assert.equal(calls, 0);
+});
+
+test('production database connections disable automatic schema index creation', async () => {
+  const client = fakeClient(async () => { client.connection.readyState = 1; });
+  await connectDatabase({ client, uri: 'mongodb://placeholder', logger: {}, production: true });
+  assert.equal(client.settings.autoIndex, false);
 });
 
 test('shares one in-flight initialization between concurrent callers', async () => {

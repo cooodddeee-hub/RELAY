@@ -1,10 +1,15 @@
 import { GoogleGenAI } from '@google/genai';
-import { verifyEvidenceQuote } from './evidenceVerification.js';
+import { diagnoseEvidenceQuoteMismatch, verifyEvidenceQuote } from './evidenceVerification.js';
 const allowed = ['Decision', 'Completed Work', 'Pending Tasks', 'Responsibilities', 'Blockers', 'Dependencies', 'Risks', 'Next Actions', 'Unresolved Questions'];
 export const GEMINI_TIMEOUT_MS = 30_000;
 export const GEMINI_MAX_RETRIES = 2;
 export const CLOUDFLARE_MODEL = '@cf/openai/gpt-oss-20b';
 export const DEFAULT_ANALYSIS_PROVIDER = 'cloudflare';
+const validationFailureCodes = new Set([
+  'invalid_json', 'invalid_response_envelope', 'missing_findings_array', 'invalid_finding_schema',
+  'missing_evidence', 'evidence_quote_mismatch', 'unsupported_evidence_reference', 'incomplete_provider_response',
+]);
+const validationStages = new Set(['provider_envelope', 'model_json', 'findings_array', 'finding_schema', 'evidence_reference', 'evidence_verification']);
 
 export class GeminiAnalysisError extends Error {
   constructor(message, options = {}) {
@@ -16,6 +21,7 @@ export class GeminiAnalysisError extends Error {
     this.providerStatus = options.providerStatus;
     this.retryable = options.retryable || false;
     this.providerAttempts = options.providerAttempts;
+    this.validationDiagnostic = options.validationDiagnostic;
   }
 }
 
@@ -128,6 +134,46 @@ function providerDiagnostic(provider, phase, fields = {}) {
   console.info(JSON.stringify({ level: 'info', operation: 'analysis.providerRequest', provider, phase, ...fields }));
 }
 
+function safeDiagnosticContext(source, options = {}) {
+  const supplied = options.diagnosticContext || {};
+  const sourceType = ['upload', 'readme', 'commit', 'issue'].includes(supplied.sourceType)
+    ? supplied.sourceType
+    : source?.provider === 'github' && ['readme', 'commit', 'issue'].includes(source?.externalType)
+      ? source.externalType : source?.provider === 'github' ? 'github_other' : 'upload';
+  const sourceId = String(supplied.sourceId || source?._id || '');
+  const sourcePosition = Number(supplied.sourcePosition);
+  return {
+    sourceType,
+    ...(Number.isInteger(sourcePosition) && sourcePosition > 0 && sourcePosition <= 500 ? { sourcePosition } : {}),
+    ...( /^[a-f\d]{24}$/i.test(sourceId) ? { sourceId } : {}),
+  };
+}
+
+function validationError(source, options, provider, validationStage, failureCode, message, details = {}) {
+  const code = validationFailureCodes.has(failureCode) ? failureCode : 'invalid_response_envelope';
+  const stage = validationStages.has(validationStage) ? validationStage : 'provider_envelope';
+  const validationDiagnostic = {
+    provider,
+    ...safeDiagnosticContext(source, options),
+    validationStage: stage,
+    failureCode: code,
+  };
+  const mismatchFlags = details.quoteMatchDiagnostics;
+  if (mismatchFlags && ['exactQuoteMatch', 'caseOnlyMatch', 'punctuationOnlyMatch', 'unicodeNormalizationMatch']
+    .every((key) => typeof mismatchFlags[key] === 'boolean')) {
+    validationDiagnostic.quoteMatchDiagnostics = {
+      exactQuoteMatch: mismatchFlags.exactQuoteMatch,
+      caseOnlyMatch: mismatchFlags.caseOnlyMatch,
+      punctuationOnlyMatch: mismatchFlags.punctuationOnlyMatch,
+      unicodeNormalizationMatch: mismatchFlags.unicodeNormalizationMatch,
+    };
+  }
+  providerDiagnostic(provider, 'validationFailed', validationDiagnostic);
+  return new GeminiAnalysisError(message, {
+    status: 502, kind: 'invalid_response', provider, validationDiagnostic,
+  });
+}
+
 function attemptMetadata(provider, error, fallbackOccurred = false) {
   const status = providerStatus(error);
   let category = 'unknown';
@@ -176,37 +222,62 @@ async function measuredRequest(provider, request, fallbackOccurred, options) {
   }
 }
 
-function parseFindings(response, source, strict, provider) {
+function parseFindings(response, source, strict, provider, options) {
+  if (!response || typeof response.text !== 'string' || !response.text.trim()) {
+    throw validationError(source, options, provider, 'provider_envelope', 'incomplete_provider_response', 'AI provider returned an incomplete analysis response.');
+  }
   const backticks = String.fromCharCode(96);
-  const raw = (response.text || '')
+  const raw = response.text
     .replace(new RegExp('^' + backticks + '{3}(?:json)?\\s*', 'i'), '')
     .replace(new RegExp('\\s*' + backticks + '{3}$'), '');
   let parsed;
   try { parsed = JSON.parse(raw); }
-  catch (cause) { throw new GeminiAnalysisError('AI provider returned an unreadable analysis response.', { status: 502, kind: 'invalid_response', provider, cause }); }
-  if (!Array.isArray(parsed.findings)) throw new GeminiAnalysisError('AI provider response did not contain a findings list.', { status: 502, kind: 'invalid_response', provider });
+  catch { throw validationError(source, options, provider, 'model_json', 'invalid_json', 'AI provider returned an unreadable analysis response.'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw validationError(source, options, provider, 'findings_array', 'invalid_response_envelope', 'AI provider response did not contain a valid findings envelope.');
+  }
+  if (!Array.isArray(parsed.findings)) {
+    throw validationError(source, options, provider, 'findings_array', 'missing_findings_array', 'AI provider response did not contain a findings list.');
+  }
   const findings = [];
   for (const finding of parsed.findings) {
-    const validBase = finding && allowed.includes(finding.category) && finding.title && finding.description;
-    const validStrict = validBase && typeof finding.title === 'string' && finding.title.trim()
+    const suppliedSource = finding && (Object.hasOwn(finding, 'sourceId') ? finding.sourceId : Object.hasOwn(finding, 'source') ? finding.source : undefined);
+    const suppliedRevision = finding && (Object.hasOwn(finding, 'sourceRevision') ? finding.sourceRevision : undefined);
+    const expectedSource = String(source?._id || '');
+    const expectedRevision = String(source?._analysisRevisionId || '');
+    if ((suppliedSource !== undefined && String(suppliedSource) !== expectedSource)
+      || (suppliedRevision !== undefined && String(suppliedRevision) !== expectedRevision)) {
+      throw validationError(source, options, provider, 'evidence_reference', 'unsupported_evidence_reference', provider + ' returned an unsupported source reference.');
+    }
+    const validFinding = finding && typeof finding === 'object' && !Array.isArray(finding)
+      && allowed.includes(finding.category)
+      && typeof finding.title === 'string' && finding.title.trim()
+      && finding.title.length <= 500
       && typeof finding.description === 'string' && finding.description.trim()
-      && (!('confidence' in finding) || (Number.isFinite(finding.confidence) && finding.confidence >= 0 && finding.confidence <= 1));
-    if (!(strict ? validStrict : validBase)) {
-      if (strict) throw new GeminiAnalysisError(provider + ' returned a finding that failed RELAY validation.', { status: 502, kind: 'invalid_response', provider });
-      continue;
+      && finding.description.length <= 5000
+      && (!('confidence' in finding) || (Number.isFinite(finding.confidence) && finding.confidence >= 0 && finding.confidence <= 1))
+      && (!('quote' in finding) || typeof finding.quote === 'string')
+      && (!('section' in finding) || typeof finding.section === 'string');
+    if (!validFinding) {
+      throw validationError(source, options, provider, 'finding_schema', 'invalid_finding_schema', provider + ' returned a finding that failed RELAY validation.');
+    }
+    const quote = typeof finding.quote === 'string' ? finding.quote : '';
+    if (strict && !quote.trim()) {
+      throw validationError(source, options, provider, 'evidence_verification', 'missing_evidence', provider + ' returned a finding without supporting evidence.');
     }
     const evidence = verifyEvidenceQuote({
       sourceId: source._id,
       sourceName: source.originalName,
       sourceText: source.extractedText,
-      quote: typeof finding.quote === 'string' ? finding.quote : '',
+      sourceRevision: source._analysisRevisionId,
+      locator: source._analysisRevisionLocator,
+      quote,
       section: strict ? '' : (typeof finding.section === 'string' ? finding.section : ''),
     });
     if (strict && evidence.verificationStatus !== 'verified') {
-      throw new GeminiAnalysisError(provider + ' returned evidence that could not be verified against the source.', { status: 502, kind: 'invalid_response', provider });
-    }
-    if (strict && (finding.title.length > 500 || finding.description.length > 5000)) {
-      throw new GeminiAnalysisError(provider + ' returned a finding that exceeded RELAY limits.', { status: 502, kind: 'invalid_response', provider });
+      throw validationError(source, options, provider, 'evidence_verification', 'evidence_quote_mismatch', provider + ' returned evidence that could not be verified against the source.', {
+        quoteMatchDiagnostics: diagnoseEvidenceQuoteMismatch({ sourceText: source.extractedText, quote }),
+      });
     }
     findings.push({
       category: finding.category,
@@ -220,9 +291,9 @@ function parseFindings(response, source, strict, provider) {
 }
 
 function createPrompt(source) {
-  return 'Analyze this project document for handover. Return ONLY JSON: {"findings":[{"category":"one of '
+  return 'Analyze this project document for handover. Return ONLY one valid JSON object with a "findings" array, using this shape: {"findings":[{"category":"one of '
     + allowed.join(', ')
-    + '","title":"...","description":"...","confidence":0.0,"quote":"exact supporting quote copied from source","section":"page/heading/section only if explicitly available"}]}. Never infer a quote, page or section. If no evidence exists, omit the finding. Confidence must be 0..1. Document name: '
+    + '","title":"...","description":"...","confidence":0.0,"quote":"exact supporting quote copied verbatim from the source","section":"page/heading/section only if explicitly available"}]}. Evidence quotations must be exact, contiguous text copied from the source. Preserve original wording, casing, and punctuation exactly. Never paraphrase, rewrite, summarize, normalize, or invent evidence. If you cannot provide an exact supporting quotation, omit that finding. Always include the "findings" property and make its value an array. If the source is empty, very short, or contains no supported findings, return exactly {"findings":[]}. Never omit the findings array or infer a page or section. Confidence must be 0..1. Document name: '
     + source.originalName
     + '\n\nDOCUMENT TEXT:\n'
     + String(source.extractedText || '').slice(0, 45000);
@@ -339,7 +410,7 @@ async function requestCloudflare(source, prompt, options, fallbackOccurred) {
         }
         try { return await response.json(); }
         catch (cause) {
-          throw new GeminiAnalysisError('Cloudflare returned an unreadable analysis response.', { status: 502, kind: 'invalid_response', provider: 'cloudflare', cause });
+          throw validationError(source, options, 'cloudflare', 'provider_envelope', 'invalid_response_envelope', 'Cloudflare returned an unreadable analysis response.');
         }
       }, fallbackOccurred, options);
       return { response: payload, provider: 'cloudflare' };
@@ -359,9 +430,13 @@ async function requestCloudflare(source, prompt, options, fallbackOccurred) {
   throw new GeminiAnalysisError('Cloudflare Workers AI could not complete the analysis.', { status: 503, kind: 'provider', provider: 'cloudflare' });
 }
 
-function cloudflareModelText(payload) {
-  if (!payload || payload.success !== true) {
-    throw new GeminiAnalysisError('Cloudflare returned an incomplete analysis response.', { status: 502, kind: 'invalid_response', provider: 'cloudflare' });
+function cloudflareModelText(payload, source, options) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.success !== true) {
+    throw validationError(source, options, 'cloudflare', 'provider_envelope', 'invalid_response_envelope', 'Cloudflare returned an incomplete analysis response.');
+  }
+  const firstChoice = Array.isArray(payload.result?.choices) ? payload.result.choices[0] : undefined;
+  if (firstChoice?.finish_reason === 'length' || firstChoice?.finishReason === 'length') {
+    throw validationError(source, options, 'cloudflare', 'provider_envelope', 'incomplete_provider_response', 'Cloudflare returned an incomplete analysis response.');
   }
   const output = typeof (payload.result && payload.result.response) === 'string'
     ? payload.result.response
@@ -372,7 +447,7 @@ function cloudflareModelText(payload) {
         && typeof payload.result.choices[0].message.content === 'string'
         ? payload.result.choices[0].message.content
         : null;
-  if (!output) throw new GeminiAnalysisError('Cloudflare returned an incomplete analysis response.', { status: 502, kind: 'invalid_response', provider: 'cloudflare' });
+  if (!output) throw validationError(source, options, 'cloudflare', 'provider_envelope', 'incomplete_provider_response', 'Cloudflare returned an incomplete analysis response.');
   return { text: output };
 }
 
@@ -421,14 +496,13 @@ export async function extractFindings(source, options = {}) {
   const strict = providerResult.provider === 'cloudflare';
   let findings;
   try {
-    const response = strict ? cloudflareModelText(providerResult.response) : providerResult.response;
-    findings = parseFindings(response, source, strict, providerResult.provider);
+    const response = strict ? cloudflareModelText(providerResult.response, source, options) : providerResult.response;
+    findings = parseFindings(response, source, strict, providerResult.provider, options);
   } catch (error) {
     if (error instanceof GeminiAnalysisError && error.kind === 'invalid_response') {
       const latestAttempt = options.providerAttempts.at(-1);
       if (latestAttempt) Object.assign(latestAttempt, { outcome: 'invalid_output', category: 'invalid_output', errorCode: 'invalid_output' });
       error.providerAttempts = options.providerAttempts;
-      providerDiagnostic(providerResult.provider, 'validationFailed', { fallbackOccurred, reason: error.kind });
     }
     throw error;
   }
